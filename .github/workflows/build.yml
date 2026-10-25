@@ -55,7 +55,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential flex bison libssl-dev \
             libelf-dev bc zip unzip python3 cpio rsync device-tree-compiler \
-            git curl wget xz-utils liblz4-dev
+            git curl wget xz-utils liblz4-dev libxml2 libxml2-dev zlib1g-dev \
+            libncurses-dev linux-libc-dev
+          sudo ldconfig || true
+          # sanity: ld.lld needs libxml2.so.2 on ubuntu-26.04 runners
+          ldconfig -p | grep -q libxml2 || sudo apt-get install -y -qq libxml2 || true
 
       - name: Download Clang (ZyCromerZ mirror)
         run: |
