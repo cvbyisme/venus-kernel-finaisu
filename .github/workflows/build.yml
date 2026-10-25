@@ -59,6 +59,10 @@ jobs:
             libncurses-dev linux-libc-dev
           sudo ldconfig || true
           # sanity: ld.lld needs libxml2.so.2 on ubuntu-26.04 runners
+          ldconfig -p | grep -q libxml2 || sudo apt-get install -y -qq libxml2 || true libxml2 libxml2-dev zlib1g-dev \
+            libncurses-dev linux-libc-dev
+          sudo ldconfig || true
+          # sanity: ld.lld needs libxml2.so.2 on ubuntu-26.04 runners
           ldconfig -p | grep -q libxml2 || sudo apt-get install -y -qq libxml2 || true
 
       - name: Download Clang (ZyCromerZ mirror)
