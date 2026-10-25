@@ -1,0 +1,136 @@
+name: Build venus kernel with FinaSU
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_ref:
+        description: 'FinaSU git ref'
+        required: false
+        default: 'master'
+      kernel_repo:
+        description: 'kernel source repo (owner/name)'
+        required: false
+        default: 'cvbyisme/android_kernel_xiaomi_sm8350_miyume'
+      kernel_ref:
+        description: 'kernel source ref'
+        required: false
+        default: 'main'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout this CI repo
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout kernel sources
+        run: |
+          git clone --depth 1 --branch "${{ inputs.kernel_ref || 'main' }}" \
+            "https://github.com/${{ inputs.kernel_repo || 'cvbyisme/android_kernel_xiaomi_sm8350_miyume' }}.git" kernel
+          echo "kernel HEAD: $(git -C kernel rev-parse --short HEAD)"
+
+      - name: Clone FinaSU into KernelSU/
+        run: |
+          rm -rf kernel/KernelSU
+          git clone --depth 1 --branch "${{ inputs.ksu_ref || 'master' }}" \
+            https://github.com/LyraVoid/FinaSU.git kernel/KernelSU
+          echo "FinaSU HEAD: $(git -C kernel/KernelSU rev-parse --short HEAD)"
+
+      - name: Integrate SUSFS 5.4 into FinaSU kernel tree
+        run: |
+          chmod +x ci/scripts/susfs-setup.sh
+          KDIR_OVERRIDE="$PWD/kernel" bash ci/scripts/susfs-setup.sh
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison libssl-dev \
+            libelf-dev bc zip unzip python3 cpio rsync device-tree-compiler \
+            git curl wget xz-utils liblz4-tool
+
+      - name: Download Clang (ZyCromerZ mirror)
+        run: |
+          mkdir -p $HOME/toolchain
+          cd $HOME/toolchain
+          curl -sSL --retry 5 --retry-delay 5 -o clang.tar.gz \
+            https://github.com/ZyCromerZ/Clang/releases/download/14.0.6-20261022-release/Clang-14.0.6-20261022.tar.gz
+          tar -xzf clang.tar.gz
+          rm -f clang.tar.gz
+          CLANG_BIN=$(find "$HOME/toolchain" -maxdepth 4 -name clang \( -type f -o -type l \) | head -1)
+          if [ -z "$CLANG_BIN" ]; then
+            echo "::error::clang binary not found in toolchain tarball"
+            find "$HOME/toolchain" -maxdepth 3 | head -30
+            exit 1
+          fi
+          TCDIR=$(dirname "$CLANG_BIN")
+          echo "Toolchain bin: $TCDIR"
+          echo "TCBIN=$TCDIR" >> $GITHUB_ENV
+          "$TCDIR/clang" --version
+
+      - name: Build kernel
+        run: |
+          cd kernel
+          export PATH="$TCBIN:$PATH"
+          export ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1
+          export CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+          export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf
+          clang --version
+
+          make -j$(nproc) O=out venus_defconfig
+
+          ./scripts/config --file out/.config \
+            --enable KPROBES --enable KSU --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP \
+            --enable KSU_DYNAMIC_MANAGER
+
+          make -j$(nproc) O=out olddefconfig
+
+          echo "=== SUSFS / KSU config check ==="
+          grep -E 'CONFIG_KSU|CONFIG_SUSFS|CONFIG_KPROBES|CONFIG_THREAD_INFO' out/.config || true
+
+          MISSING=0
+          for sym in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KSU_SUSFS_SUS_PATH \
+                     CONFIG_KSU_SUSFS_SUS_MOUNT CONFIG_KSU_SUSFS_SUS_MAP \
+                     CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KPROBES; do
+            if ! grep -qx "$sym=y" out/.config; then
+              echo "::error::$sym=y is missing from out/.config"
+              MISSING=1
+            fi
+          done
+          if [ "$MISSING" -ne 0 ]; then
+            echo "--- dependency diagnostics ---"
+            grep -E '^CONFIG_(KPROBES|EXT4_FS|THREAD_INFO_IN_TASK|MODULES)' out/.config || true
+            exit 1
+          fi
+          echo "KSU/SUSFS config gate: PASS"
+
+          make -j$(nproc) O=out Image Image.gz dtbs
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifact
+          cp kernel/out/arch/arm64/boot/Image artifact/Image
+          cp kernel/out/arch/arm64/boot/Image.gz artifact/Image.gz || true
+          cp kernel/out/.config artifact/kernel.config
+          (cd artifact && sha256sum Image > Image.sha256)
+          strings artifact/Image | grep -m3 'Linux version' || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-finaus-kernel
+          path: artifact/*
+          if-no-files-found: error
