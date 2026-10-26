@@ -55,15 +55,30 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential flex bison libssl-dev \
             libelf-dev bc zip unzip python3 cpio rsync device-tree-compiler \
-            git curl wget xz-utils liblz4-dev libxml2 libxml2-dev zlib1g-dev \
-            libncurses-dev linux-libc-dev
+            git curl wget xz-utils liblz4-dev zlib1g-dev libncurses-dev \
+            linux-libc-dev || true
           sudo ldconfig || true
-          # sanity: ld.lld needs libxml2.so.2 on ubuntu-26.04 runners
-          ldconfig -p | grep -q libxml2 || sudo apt-get install -y -qq libxml2 || true libxml2 libxml2-dev zlib1g-dev \
-            libncurses-dev linux-libc-dev
-          sudo ldconfig || true
-          # sanity: ld.lld needs libxml2.so.2 on ubuntu-26.04 runners
-          ldconfig -p | grep -q libxml2 || sudo apt-get install -y -qq libxml2 || true
+          echo "=== libxml2 check ==="
+          ldconfig -p | grep libxml2 || echo "libxml2.so missing"
+          if ! ldconfig -p | grep -q "libxml2.so.2"; then
+            for pkg in libxml2-dev libxml2-2 libxml2-16 libxml2t64; do
+              sudo apt-get install -y -qq "$pkg" 2>/dev/null && echo "ok $pkg" || true
+            done
+            sudo ldconfig || true
+          fi
+          if ! ldconfig -p | grep -q "libxml2.so.2"; then
+            LIB=$(find /usr/lib /lib -name "libxml2.so*" 2>/dev/null | head -1)
+            echo "fallback lib: $LIB"
+            if [ -n "$LIB" ]; then
+              T=$(readlink -f "$LIB")
+              sudo ln -sf "$T" /usr/lib/x86_64-linux-gnu/libxml2.so.2 || true
+              sudo ldconfig || true
+            else
+              echo "::error::libxml2.so.2 unavailable"
+              exit 1
+            fi
+          fi
+          ldconfig -p | grep libxml2 || true
 
       - name: Download Clang (ZyCromerZ mirror)
         run: |
