@@ -178,7 +178,7 @@ jobs:
           sed -i "s/^device.name5=.*/device.name5=/" anykernel.sh
           sed -i "s#^BLOCK=.*#BLOCK=/dev/block/bootdevice/by-name/boot;#" anykernel.sh
           sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/" anykernel.sh
-          python3 -c "import sys;p='anykernel.sh';s=open(p).read();a=s.index('dump_boot;');b=s.index('write_boot;')+len('write_boot;');open(p,'w').write(s[:a]+'dump_boot;\nwrite_boot;'+s[b:])"
+          sed -i '/^backup_file /d;/^replace_string /d;/^insert_line /d;/^append_file /d;/^patch_fstab /d' anykernel.sh
           chmod +x anykernel.sh
           NAME="venus-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
           zip -r9 "../${NAME}.zip" . -x "*.git*" > /dev/null
@@ -189,7 +189,7 @@ jobs:
       - name: Publish test release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: test-run-${GITHUB_RUN_NUMBER}
+          tag_name: test-run-${{ github.run_number }}
           name: venus FinaSU test build
           body: |
             venus (Xiaomi 11) FinaSU built-in kernel - TEST BUILD
@@ -204,7 +204,7 @@ jobs:
             Install: flash in TWRP or a kernel flasher app.
             Manager: must use FinaSU v1.2.1 (exact signature match).
             Rollback: keep a stock boot.img backup.
-          files: /home/runner/work/venus-kernel-finaisu/venus-kernel-finaisu/${AK3_NAME}.zip
+          files: ${{ github.workspace }}/${{ env.AK3_NAME }}.zip
           prerelease: true
           draft: false
         env:
