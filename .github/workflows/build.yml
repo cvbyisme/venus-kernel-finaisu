@@ -162,3 +162,50 @@ jobs:
           name: venus-finaus-kernel
           path: artifact/*
           if-no-files-found: error
+      - name: Package AnyKernel3 zip
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cd ak3
+          rm -rf .git .github patch README.md
+          mkdir -p patch
+          cp ../kernel/out/arch/arm64/boot/Image .
+          sed -i "s/^kernel.string=.*/kernel.string=venus-FinaSU by cvby/" anykernel.sh
+          sed -i "s/^device.name1=.*/device.name1=venus/" anykernel.sh
+          sed -i "s/^device.name2=.*/device.name2=/" anykernel.sh
+          sed -i "s/^device.name3=.*/device.name3=/" anykernel.sh
+          sed -i "s/^device.name4=.*/device.name4=/" anykernel.sh
+          sed -i "s/^device.name5=.*/device.name5=/" anykernel.sh
+          sed -i "s#^BLOCK=.*#BLOCK=/dev/block/bootdevice/by-name/boot;#" anykernel.sh
+          sed -i "s/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/" anykernel.sh
+          python3 -c "import sys;p='anykernel.sh';s=open(p).read();a=s.index('dump_boot;');b=s.index('write_boot;')+len('write_boot;');open(p,'w').write(s[:a]+'dump_boot;\nwrite_boot;'+s[b:])"
+          chmod +x anykernel.sh
+          NAME="venus-FinaSU-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          zip -r9 "../${NAME}.zip" . -x "*.git*" > /dev/null
+          cd ..
+          ls -lh *.zip
+          echo "AK3_NAME=${NAME}" >> $GITHUB_ENV
+
+      - name: Publish test release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test-run-${GITHUB_RUN_NUMBER}
+          name: venus FinaSU test build
+          body: |
+            venus (Xiaomi 11) FinaSU built-in kernel - TEST BUILD
+
+            NOT VERIFIED ON DEVICE. Flash at your own risk.
+
+            - Kernel 5.4.302-HoshinoNeko, ZyC clang 14.0.6
+            - FinaSU trusted slot2 = v1.2.1 release signature (size 716)
+            - SUSFS 5.4 backport integrated, KSU/SUSFS config gate PASS
+            - Package: AnyKernel3 zip
+
+            Install: flash in TWRP or a kernel flasher app.
+            Manager: must use FinaSU v1.2.1 (exact signature match).
+            Rollback: keep a stock boot.img backup.
+          files: /home/runner/work/venus-kernel-finaisu/venus-kernel-finaisu/${AK3_NAME}.zip
+          prerelease: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
