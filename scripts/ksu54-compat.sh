@@ -497,6 +497,119 @@ open(p, 'w', encoding='utf-8').write(s)
 print('sucompat.c: ksu_handle_devpts no-op stub appended')
 DEVPEOF
 fi
+echo "=== [KSU54] step 9: provide KSU hook symbols that extension/susfs.c used to own ==="
+# FinaSU Kbuild has:
+#   kernelsu-$(CONFIG_KSU_SUSFS) += extension/susfs.o
+# That single file carries the only definitions of ksu_handle_execveat(),
+# ksu_handle_faccessat(), ksu_handle_stat(), ksu_handle_sys_reboot(),
+# ksu_handle_sys_read() and ksu_handle_vfs_fstat(). The vendor kernel tree
+# still calls several of them from fs/open.c, fs/stat.c, fs/exec.c and
+# kernel/reboot.c under plain CONFIG_KSU, so with CONFIG_KSU_SUSFS=n the
+# final vmlinux link dies with:
+#   undefined symbol: ksu_handle_sys_reboot / ksu_handle_faccessat
+#   undefined symbol: ksu_handle_stat / ksu_handle_execveat
+# Provide an unconditional stub object and hook it into Kbuild.
+STUB="$SUDIR/extension/ksu54_stub.c"
+if [ ! -f "$STUB" ]; then
+  cat > "$STUB" <<'STUBEOF'
+/*
+ * ksu54_stub.c - SUSFS-free stand-ins for the hooks FinaSU keeps inside
+ * extension/susfs.c.
+ *
+ * extension/susfs.c is compiled only when CONFIG_KSU_SUSFS=y, yet the vendor
+ * kernel tree references ksu_handle_faccessat(), ksu_handle_stat(),
+ * ksu_handle_execveat() and ksu_handle_sys_reboot() behind plain CONFIG_KSU.
+ * With SUSFS disabled those references cannot be resolved, so this file
+ * supplies ABI-compatible no-ops.
+ *
+ * Signatures follow the extern declarations present in the vendor tree so the
+ * pointer types match the callers exactly (C links by name only, a mismatched
+ * prototype would silently corrupt arguments at runtime).
+ */
+#include <linux/cred.h>
+#include <linux/fs.h>
+#include <linux/types.h>
+#include <linux/uaccess.h>
+
+#include "uapi/supercall.h"
+
+struct user_arg_ptr;
+
+/* fs/exec.c */
+int __maybe_unused ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv, void *envp,
+                                       int *flags)
+{
+    return -EINVAL;
+}
+
+/* fs/open.c */
+int __maybe_unused ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode, int *flags)
+{
+    return 0;
+}
+
+/* fs/stat.c */
+int __maybe_unused ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)
+{
+    return 0;
+}
+
+void __maybe_unused ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr)
+{
+    (void)fd;
+    (void)kstat_size_ptr;
+}
+
+void __maybe_unused ksu_handle_sys_read(unsigned int fd)
+{
+    (void)fd;
+}
+
+/*
+ * kernel/reboot.c calls this first and only falls through to the real reboot
+ * path when the return value is non-zero. Returning 0 means "handled", so we
+ * must return 0 for the KernelSU install magic pair and -EINVAL otherwise.
+ * The SUSFS command table is intentionally gone: those fall through as
+ * -EINVAL, which the caller turns into -EINVAL before doing a real reboot.
+ */
+int __maybe_unused ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg)
+{
+    (void)cmd;
+    (void)arg;
+
+    if (magic1 != (int)KSU_INSTALL_MAGIC1)
+        return -EINVAL;
+    if (magic2 == (int)KSU_INSTALL_MAGIC2)
+        return 0;
+    return -EINVAL;
+}
+STUBEOF
+  echo "extension/ksu54_stub.c written"
+else
+  echo "extension/ksu54_stub.c already present"
+fi
+
+KB="$SUDIR/Kbuild"
+if [ -f "$KB" ]; then
+  if grep -q 'ksu54_stub' "$KB"; then
+    echo "Kbuild already lists ksu54_stub.o"
+  else
+    python3 - "$KB" <<'KBEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+old = 'kernelsu-$(CONFIG_KSU_SUSFS) += extension/susfs.o'
+if old not in s:
+    raise SystemExit('Kbuild: CONFIG_KSU_SUSFS object line not found')
+new = old + chr(10) + '# ksu54_stub: unconditional stand-ins for the hooks shipped inside susfs.o' + chr(10) + 'kernelsu-y += extension/ksu54_stub.o'
+s = s.replace(old, new, 1)
+open(p, 'w', encoding='utf-8').write(s)
+print('Kbuild: extension/ksu54_stub.o added unconditionally')
+KBEOF
+  fi
+fi
+
+###INSERT_HERE###
 echo "=== [KSU54] step 8b: guard fs/devpts/inode.c hook call behind the stub ==="
 DPT="$KDIR/fs/devpts/inode.c"
 if [ -f "$DPT" ] && grep -q ksu_handle_devpts "$DPT"; then
