@@ -416,10 +416,51 @@ fi
 KUM="$SUDIR/feature/kernel_umount.c"
 if [ -f "$KUM" ] && grep -q 'path_umount' "$KUM"; then
 python3 - "$KUM" <<'KUMEOF'
-import sys, base64
-src = base64.b64decode('aW1wb3J0IHN5cwoKcCA9IHN5cy5hcmd2WzFdCnMgPSBvcGVuKHApLnJlYWQoKQoKb2xkID0gImV4dGVybiBpbnQgcGF0aF91bW91bnQoc3RydWN0IHBhdGggKnBhdGgsIGludCBmbGFncyk7IgpuZXcgPSAoIi8qIDUuNCBoYXMgbm8gcGF0aF91bW91bnQoKTsga3N5c191bW91bnQoKSB0YWtlcyBhIHBhdGggc3RyaW5nLiAqL1xuIgogICAgICAgImV4dGVybiBpbnQga3N5c191bW91bnQoY2hhciBfX3VzZXIgKm5hbWUsIGludCBmbGFncyk7IikKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgicGF0aF91bW91bnQgZGVjbCBhbmNob3Igbm90IGZvdW5kIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZF9mbiA9ICJzdGF0aWMgdm9pZCBrc3VfdW1vdW50X21udChjb25zdCBjaGFyICptbnQsIHN0cnVjdCBwYXRoICpwYXRoLCBpbnQgZmxhZ3MpXG57XG4gICAgaW50IGVyciA9IHBhdGhfdW1vdW50KHBhdGgsIGZsYWdzKTtcbiIKbmV3X2ZuID0gKCJzdGF0aWMgdm9pZCBrc3VfdW1vdW50X21udChjb25zdCBjaGFyICptbnQsIHN0cnVjdCBwYXRoICpwYXRoLCBpbnQgZmxhZ3MpXG4iCiAgICAgICAgICAie1xuIgogICAgICAgICAgIiAgICBpbnQgZXJyO1xuIgogICAgICAgICAgIiAgICBjaGFyICpkaXIgPSBrbWFsbG9jKFBBVEhfTUFYLCBHRlBfS0VSTkVMKTtcbiIKICAgICAgICAgICJcbiIKICAgICAgICAgICIgICAgaWYgKCFkaXIpXG4iCiAgICAgICAgICAiICAgICAgICByZXR1cm47XG4iCiAgICAgICAgICAiICAgIHtcbiIKICAgICAgICAgICIgICAgICAgIGNoYXIgKnAyID0gZF9wYXRoKHBhdGgsIGRpciwgUEFUSF9NQVgpO1xuIgogICAgICAgICAgIiAgICAgICAgaWYgKCFJU19FUlIocDIpKSB7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgbW1fc2VnbWVudF90IG9sZGZzID0gZ2V0X2ZzKCk7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgc2V0X2ZzKEtFUk5FTF9EUyk7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgZXJyID0ga3N5c191bW91bnQoKGNoYXIgX191c2VyICopcDIsIGZsYWdzKTtcbiIKICAgICAgICAgICIgICAgICAgICAgICBzZXRfZnMob2xkZnMpO1xuIgogICAgICAgICAgIiAgICAgICAgfSBlbHNlIHtcbiIKICAgICAgICAgICIgICAgICAgICAgICBlcnIgPSAoaW50KVBUUl9FUlIocDIpO1xuIgogICAgICAgICAgIiAgICAgICAgfVxuIgogICAgICAgICAgIiAgICB9XG4iCiAgICAgICAgICAiICAgIGtmcmVlKGRpcik7XG4iKQppZiBvbGRfZm4gbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJrc3VfdW1vdW50X21udCBib2R5IGFuY2hvciBub3QgZm91bmQiKQpzID0gcy5yZXBsYWNlKG9sZF9mbiwgbmV3X2ZuLCAxKQoKb3BlbihwLCAidyIpLndyaXRlKHMpCnByaW50KCJrZXJuZWxfdW1vdW50LmM6IHBhdGhfdW1vdW50IC0+IGtzeXNfdW1vdW50IikK').decode()
-sys.argv = ['kum_fix', sys.argv[1]]
-exec(compile(src, '<kum_fix>', 'exec'))
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+
+# 1) declaration: path_umount -> ksys_umount
+old_decl = 'extern int path_umount(struct path *path, int flags);'
+new_decl = ('/* Linux 5.4 has no path_umount(); ksys_umount() takes a path string. */\n'
+            'extern int ksys_umount(char __user *name, int flags);')
+if old_decl in s:
+    s = s.replace(old_decl, new_decl, 1)
+    print('kernel_umount.c: decl path_umount -> ksys_umount')
+elif 'ksys_umount' not in s:
+    raise SystemExit('kernel_umount.c: umount decl anchor not found')
+
+# 2) body of ksu_umount_mnt(): convert struct path to a path string
+old_body = ('static void ksu_umount_mnt(struct path *path, int flags)\n'
+            '{\n'
+            '    int err = path_umount(path, flags);')
+new_body = ('static void ksu_umount_mnt(struct path *path, int flags)\n'
+            '{\n'
+            '    int err;\n'
+            '    char *dir = kmalloc(PATH_MAX, GFP_KERNEL);\n'
+            '\n'
+            '    if (!dir)\n'
+            '        return;\n'
+            '    {\n'
+            '        char *p2 = d_path(path, dir, PATH_MAX);\n'
+            '        if (!IS_ERR(p2)) {\n'
+            '            mm_segment_t oldfs = get_fs();\n'
+            '            set_fs(KERNEL_DS);\n'
+            '            err = ksys_umount((char __user *)p2, flags);\n'
+            '            set_fs(oldfs);\n'
+            '        } else {\n'
+            '            err = (int)PTR_ERR(p2);\n'
+            '        }\n'
+            '    }\n'
+            '    kfree(dir);')
+if old_body in s:
+    s = s.replace(old_body, new_body, 1)
+    print('kernel_umount.c: body path_umount -> ksys_umount')
+else:
+    raise SystemExit('kernel_umount.c: ksu_umount_mnt body anchor not found')
+
+open(p, 'w', encoding='utf-8').write(s)
+print('kernel_umount.c: patched for 5.4')
 KUMEOF
 fi
 echo "=== [KSU54] step 8: satisfy ksu_handle_devpts referenced by fs/devpts/inode.c ==="
