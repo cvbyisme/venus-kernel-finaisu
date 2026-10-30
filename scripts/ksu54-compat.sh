@@ -1,0 +1,472 @@
+#!/bin/bash
+# Linux 5.4 compatibility shims for FinaSU kernel-side code.
+#
+# FinaSU targets GKI 5.10+ kernels. This vendor tree is Linux 5.4, so a number
+# of newer kernel APIs it relies on are missing. This script bridges them
+# WITHOUT touching SUSFS: SUSFS itself is never patched in here.
+#
+# Extracted from scripts/susfs-setup.sh (steps 2 through 8), with every
+# SUSFS-specific change removed.
+#
+# Usage: bash scripts/ksu54-compat.sh [kernel_dir]
+set -euo pipefail
+KDIR="$(cd "${1:-.}" && pwd)"
+cd "$KDIR"
+[ -d "KernelSU/kernel" ] || { echo "::error::FinaSU tree missing at $KDIR/KernelSU"; exit 1; }
+echo "KERNEL_DIR=$KDIR"
+echo "=== [KSU54] start: FinaSU 5.4 compatibility layer ==="
+echo "=== [KSU54] step 1: uaccess / pgtable / minmax shims ==="
+cat > include/linux/ksu54_compat.h <<'C54'
+#ifndef _KSU54_COMPAT_H
+#define _KSU54_COMPAT_H
+#include <linux/version.h>
+#include <linux/types.h>
+#include <linux/sched.h>
+#include <linux/uaccess.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>
+#include <linux/errno.h>
+#include <linux/string.h>
+/* This vendor 5.4 tree still ships <linux/task_work.h> and
+ * <linux/static_key.h>, but <linux/minmax.h> (5.10+) and <linux/hex.h>
+ * (6.2+) are absent, so their macros are re-supplied here.
+ */
+#include <linux/task_work.h>
+#include <linux/jump_label.h>
+#include <linux/kernel.h>
+/* <linux/pgtable.h> only exists since Linux 5.8 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+#include <asm/pgtable.h>
+#endif
+/* untagged_addr() is Linux 5.7+; arm64 5.4 does no tagging on these paths */
+#ifndef untagged_addr
+#define untagged_addr(addr) (addr)
+#endif
+/* *_from_user_nofault / *_to_user_nofault are Linux 5.8+ */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+static inline int ksu54_strncpy_from_user_nofault(char *dst,
+  const void __user *src,
+  long count)
+{
+long ret;
+if (count < 0)
+return -EINVAL;
+if (!access_ok(src, count))
+return -EFAULT;
+pagefault_disable();
+ret = strncpy_from_user(dst, src, count);
+pagefault_enable();
+if (ret < 0)
+return ret;
+if (ret >= count) {
+dst[count - 1] = 0;
+return -ERANGE;
+}
+return ret;
+}
+#define strncpy_from_user_nofault(dst, src, n) \
+ksu54_strncpy_from_user_nofault((char *)(dst), (const void __user *)(src), (long)(n))
+static inline long ksu54_copy_from_user_nofault(void *dst,
+const void __user *src,
+size_t size)
+{
+long ret;
+if (!access_ok(src, size))
+return -EFAULT;
+pagefault_disable();
+ret = __copy_from_user_inatomic(dst, src, size);
+pagefault_enable();
+return ret ? -EFAULT : 0;
+}
+#define copy_from_user_nofault(dst, src, n) \
+ksu54_copy_from_user_nofault((void *)(dst), (const void __user *)(src), (size_t)(n))
+static inline long ksu54_copy_to_user_nofault(void __user *dst,
+      const void *src,
+      size_t size)
+{
+long ret;
+if (!access_ok(dst, size))
+return -EFAULT;
+pagefault_disable();
+ret = __copy_to_user_inatomic(dst, src, size);
+pagefault_enable();
+return ret ? -EFAULT : 0;
+}
+#define copy_to_user_nofault(dst, src, n) \
+ksu54_copy_to_user_nofault((void __user *)(dst), (const void *)(src), (size_t)(n))
+#endif /* < 5.8 */
+/* __p4d_to_phys(): p4d is folded away below Linux 5.8 (5-level fixup) */
+#ifndef __p4d_to_phys
+#define __p4d_to_phys(p4d) __pgd_to_phys(p4d)
+#endif
+/* copy_to_kernel_nofault() appeared in Linux 5.8 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+static inline int ksu54_copy_to_kernel_nofault(void *dst, const void *src,
+					       size_t size)
+{
+	return copy_from_kernel_nofault(dst, src, size);
+}
+#define copy_to_kernel_nofault(dst, src, n) \
+	ksu54_copy_to_kernel_nofault((void *)(dst), (const void *)(src), (size_t)(n))
+#endif /* < 5.8 */
+
+/* <linux/minmax.h> was split out of <linux/kernel.h> only in Linux 5.10 */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+#ifndef min_t
+#define min_t(type, x, y) ({ type __min1 = (x); type __min2 = (y); __min1 < __min2 ? __min1 : __min2; })
+#endif
+#ifndef max_t
+#define max_t(type, x, y) ({ type __max1 = (x); type __max2 = (y); __max1 > __max2 ? __max1 : __max2; })
+#endif
+#ifndef min
+#define min(x, y) ({ __typeof__(x) __m1 = (x); __typeof__(y) __m2 = (y); __m1 < __m2 ? __m1 : __m2; })
+#endif
+#ifndef max
+#define max(x, y) ({ __typeof__(x) __M1 = (x); __typeof__(y) __M2 = (y); __M1 > __M2 ? __M1 : __M2; })
+#endif
+#ifndef clamp
+#define clamp(v, lo, hi) ({ __typeof__(v) __c = (v); __typeof__(lo) __l = (lo); __typeof__(hi) __h = (hi); __c < __l ? __l : (__c > __h ? __h : __c); })
+#endif
+#endif /* < 5.10 */
+#endif /* _KSU54_COMPAT_H */
+C54
+echo "written include/linux/ksu54_compat.h"
+echo "=== [KSU54] step 3: drop the zygote_next call FinaSU cannot satisfy on 5.4 ==="
+SH="$KDIR/KernelSU/kernel/hook/setuid_hook.c"
+if [ -f "$SH" ]; then
+python3 - <<'PYEOF2'
+p = 'KernelSU/kernel/hook/setuid_hook.c'
+s = open(p).read()
+old = 'static void ksu_susfs_mark_umounted(bool zygote_next)\n{\n    susfs_set_current_proc_no_su();\n    susfs_set_current_proc_umounted();\n    if (zygote_next)\n        susfs_set_current_proc_umounted_for_zygote_next();\n}'
+new = ('static void ksu_susfs_mark_umounted(bool zygote_next)\n'
+       '{\n'
+       '    /*\n'
+       '     * A 5.4 kernel side only exposes the single TIF_PROC_UMOUNTED flag,\n'
+       '     * so FinaSU no_su / zygote_next markers collapse onto that bit.\n'
+       '     */\n'
+       '    (void)zygote_next;\n'
+       '    susfs_set_current_proc_no_su();\n'
+       '    susfs_set_current_proc_umounted();\n'
+       '}')
+if s.count(old) == 1:
+    open(p, 'w').write(s.replace(old, new, 1))
+    print('setuid_hook.c patched')
+else:
+    print('setuid_hook.c: anchor count=%d, skipped' % s.count(old))
+PYEOF2
+fi
+
+SUDIR="$KDIR/KernelSU/kernel"
+[ -d "$SUDIR" ] || { echo "::error::FinaSU tree not found at $SUDIR"; exit 1; }
+F="$SUDIR/feature/sucompat.c"
+if [ -f "$F" ] && grep -q pgtable.h "$F"; then
+  sed -i "s|^#include <linux/pgtable.h>$|#include <linux/ksu54_compat.h>|" "$F"
+  echo "sucompat.c: pgtable -> ksu54_compat"
+fi
+for G in "$SUDIR/runtime/ksud_integration.c" \
+         "$SUDIR/sulog/event.c" \
+         "$SUDIR/feature/adb_root.c" \
+         "$SUDIR/hook/syscall_event_bridge.c" \
+         "$SUDIR/preinit/preinit.c" \
+         "$SUDIR/hook/arm64/patch_memory.c"; do
+  [ -f "$G" ] || continue
+  if ! grep -q ksu54_compat "$G"; then
+    sed -i "1i #include <linux/ksu54_compat.h>" "$G"
+    echo "injected: ${G#$KDIR/}"
+  fi
+done
+
+echo "=== [KSU54] step 4a-hdr: strip <linux/minmax.h>/<linux/hex.h> (absent in 5.4) ==="
+for G in $(grep -rl "#include <linux/minmax.h>\|#include <linux/hex.h>" "$SUDIR" --include=*.c --include=*.h 2>/dev/null); do
+  sed -i "/^#include <linux\/minmax.h>$/d; /^#include <linux\/hex.h>$/d" "$G"
+  echo "hdr stripped: ${G#$KDIR/}"
+done
+echo "=== [KSU54] step 4b: TWA_* enum is 5.10+, task_work_add takes bool on 5.4 ==="
+for T in "$SUDIR/manager/dynamic_manager.c" \
+         "$SUDIR/policy/allowlist.c" \
+         "$SUDIR/supercall/supercall.c"; do
+  [ -f "$T" ] || continue
+  if grep -q 'TWA_RESUME\|TWA_NONE\|TWA_SIGNAL' "$T"; then
+    sed -i 's/, TWA_RESUME)/, true)/g; s/, TWA_NONE)/, false)/g; s/, TWA_SIGNAL)/, true)/g' "$T"
+    echo "TWA_* -> bool: ${T#$KDIR/}"
+  fi
+done
+echo "=== [KSU54] step 4c: seccomp.filter_count / seccomp_filter_release are 5.9+ ==="
+APF="$SUDIR/policy/app_profile.c"
+if [ -f "$APF" ] && grep -q 'filter_count' "$APF"; then
+  python3 - "$APF" <<'APFEOF'
+import io, sys
+p = sys.argv[1]
+lines = io.open(p, encoding='utf-8').read().split(chr(10))
+out = []
+for l in lines:
+    if 'seccomp.filter_count' in l:
+        out.append('#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)')
+        out.append(l)
+        out.append('#endif')
+    elif l.strip() == 'seccomp_filter_release(fake);':
+        ind = l[:len(l) - len(l.lstrip())]
+        out.append('#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)')
+        out.append(l)
+        out.append('#else')
+        out.append(ind + 'put_seccomp_filter(fake);')
+        out.append('#endif')
+    else:
+        out.append(l)
+io.open(p, 'w', encoding='utf-8').write(chr(10).join(out))
+print('app_profile.c seccomp 5.4 guards added')
+APFEOF
+fi
+echo "=== [KSU54] step 4d: struct selinux_policy is 5.7+, backport to ss->policydb ==="
+SPH="$SUDIR/selinux/sepolicy.h"
+RUL="$SUDIR/selinux/rules.c"
+SEC="$SUDIR/selinux/sepolicy.c"
+if [ -f "$SPH" ] && ! grep -q KSU54_SELINUX_POLICY_SHIM "$SPH"; then
+  python3 - "$SPH" "$RUL" <<'SEL54EOF'
+import io, sys
+
+h = sys.argv[1]
+s = io.open(h, encoding='utf-8').read()
+shim = (
+    '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)' + chr(10) +
+    '#define KSU54_SELINUX_POLICY_SHIM 1' + chr(10) +
+    '#' + 'include <linux/sched.h>' + chr(10) +
+    '#' + 'include "ss/services.h"' + chr(10) +
+    'struct selinux_policy {' + chr(10) +
+    '    struct policydb policydb;' + chr(10) +
+    '};' + chr(10) +
+    'extern struct selinux_state selinux_state;' + chr(10) +
+    '#' + 'endif' + chr(10))
+s = s.replace('struct selinux_policy *ksu_dup_sepolicy', shim + 'struct selinux_policy *ksu_dup_sepolicy', 1)
+io.open(h, 'w', encoding='utf-8').write(s)
+print('sepolicy.h: 5.4 struct selinux_policy shim')
+
+r = sys.argv[2]
+s = io.open(r, encoding='utf-8').read()
+if 'KSU54_POLICY_FIELD' not in s:
+    old = 'struct selinux_policy *backup_sepolicy;'
+    new = (
+        'struct selinux_policy *backup_sepolicy;' + chr(10) + chr(10) +
+        '#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0)' + chr(10) +
+        '#define KSU54_POLICY_FIELD' + chr(10) +
+        'static struct selinux_policy *ksu54_current_policy(void)' + chr(10) +
+        '{' + chr(10) +
+        '    static struct selinux_policy shadow;' + chr(10) +
+        '    shadow.policydb = selinux_state.ss->policydb;' + chr(10) +
+        '    return &shadow;' + chr(10) +
+        '}' + chr(10) +
+        '#define KSU_POLICY_GET() ksu54_current_policy()' + chr(10) +
+        '#define KSU_POLICY_SET(pol) (selinux_state.ss->policydb = (pol)->policydb)' + chr(10) +
+        '#define KSU_POLICY_LOCK() mutex_lock(&selinux_state.ss->status_lock)' + chr(10) +
+        '#define KSU_POLICY_UNLOCK() mutex_unlock(&selinux_state.ss->status_lock)' + chr(10) +
+        '#else' + chr(10) +
+        '#define KSU_POLICY_GET() rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex))' + chr(10) +
+        '#define KSU_POLICY_SET(pol) rcu_assign_pointer(selinux_state.policy, (pol))' + chr(10) +
+        '#define KSU_POLICY_LOCK() mutex_lock(&selinux_state.policy_mutex)' + chr(10) +
+        '#define KSU_POLICY_UNLOCK() mutex_unlock(&selinux_state.policy_mutex)' + chr(10) +
+        '#endif' + chr(10))
+    s = s.replace(old, new, 1)
+    s = s.replace('mutex_lock(&selinux_state.policy_mutex);', 'KSU_POLICY_LOCK();')
+    s = s.replace('mutex_unlock(&selinux_state.policy_mutex);', 'KSU_POLICY_UNLOCK();')
+    s = s.replace('rcu_dereference_protected(selinux_state.policy, lockdep_is_held(&selinux_state.policy_mutex));', 'KSU_POLICY_GET();')
+    s = s.replace('rcu_assign_pointer(selinux_state.policy, pol);', 'KSU_POLICY_SET(pol);')
+    # 5.4 keeps sidtab/latest_granting in selinux_state.ss, not in selinux_policy;
+    # backup_sepolicy is only consumed by selinux_hide, so keep it policydb-only.
+    a = s.find('backup_sepolicy->sidtab = kzalloc')
+    if a != -1:
+        b = s.find('    pol = ksu_dup_sepolicy(old_pol);', a)
+        if b != -1:
+            s = s[:a] + '        (void)0;' + chr(10) + '    }' + chr(10) + s[b:]
+            print('rules.c: dropped 5.7+ sidtab backup block')
+    io.open(r, 'w', encoding='utf-8').write(s)
+    print('rules.c: policy field access guarded for 5.4')
+SEL54EOF
+fi
+if [ -f "$SEC" ] && ! grep -q ksu54_sepolicy_backport "$SEC"; then
+python3 - <<'SECPEOF'
+import base64
+ADD = chr(10) + base64.b64decode("Ly8gU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IEdQTC0yLjAKLyogTGludXggNS40IGhhcyBubyBzdHJ1Y3Qgc2VsaW51eF9wb2xpY3kgKHNwbGl0IG91dCBpbiA1LjcpOyB0aGUgcG9saWN5IGRiCiAqIGxpdmVzIGluIHNlbGludXhfc3RhdGUuc3MtPnBvbGljeWRiIGd1YXJkZWQgYnkgcG9saWN5X3J3bG9jay4gS2VlcGluZyB0aGUKICogc2FtZSBrc3VfZHVwX3NlcG9saWN5KCkva3N1X2Rlc3Ryb3lfc2Vwb2xpY3koKSBzdXJmYWNlIGxldHMgRmluYVNVJ3MKICogYXBwbHlfa2VybmVsc3VfcnVsZXMoKSBydW4gdW5jaGFuZ2VkIG9uIDUuNC4KICovCiNpbmNsdWRlIDxsaW51eC9sb2NrZGVwLmg+CiNpbmNsdWRlIDxsaW51eC9yY3VwZGF0ZS5oPgojaW5jbHVkZSA8bGludXgvc2xhYi5oPgojaW5jbHVkZSA8bGludXgvdm1hbGxvYy5oPgojaW5jbHVkZSA8bGludXgvdmVyc2lvbi5oPgojaW5jbHVkZSAic3Mvc2VydmljZXMuaCIKI2luY2x1ZGUgInNlbGludXguaCIKI2luY2x1ZGUgInNlcG9saWN5LmgiCiNpbmNsdWRlICJrbG9nLmgiIC8vIElXWVUgcHJhZ21hOiBrZWVwCgp2b2lkIGtzdV9kZXN0cm95X3NlcG9saWN5KHN0cnVjdCBzZWxpbnV4X3BvbGljeSAqcG9sKQp7CiAgICBpZiAoIXBvbCkKICAgICAgICByZXR1cm47CiAgICBwb2xpY3lkYl9kZXN0cm95KCZwb2wtPnBvbGljeWRiKTsKICAgIGtmcmVlKHBvbCk7Cn0KCnN0cnVjdCBzZWxpbnV4X3BvbGljeSAqa3N1X2R1cF9zZXBvbGljeShzdHJ1Y3Qgc2VsaW51eF9wb2xpY3kgKm9sZF9wb2wpCnsKICAgIHN0cnVjdCBzZWxpbnV4X3BvbGljeSAqbmV3X3BvbDsKICAgIHN0cnVjdCBwb2xpY3lfZmlsZSBmcDsKICAgIHZvaWQgKmRhdGE7CiAgICBzaXplX3QgbGVuOwogICAgaW50IHJldDsKCiAgICBsZW4gPSBvbGRfcG9sLT5wb2xpY3lkYi5sZW47CiAgICBkYXRhID0gdm1hbGxvYyhsZW4pOwogICAgaWYgKCFkYXRhKQogICAgICAgIHJldHVybiBFUlJfUFRSKC1FTk9NRU0pOwoKICAgIGZwLmRhdGEgPSBkYXRhOwogICAgZnAubGVuID0gbGVuOwogICAgcmV0ID0gcG9saWN5ZGJfd3JpdGUoJm9sZF9wb2wtPnBvbGljeWRiLCAmZnApOwogICAgaWYgKHJldCkgewogICAgICAgIHByX2Vycigic2Vwb2xpY3k1NDogcG9saWN5ZGJfd3JpdGU6ICVkXG4iLCByZXQpOwogICAgICAgIGdvdG8gb3V0X2ZyZWVfZGF0YTsKICAgIH0KICAgIGxlbiAtPSBmcC5sZW47CgogICAgbmV3X3BvbCA9IGt6YWxsb2Moc2l6ZW9mKCpuZXdfcG9sKSwgR0ZQX0tFUk5FTCk7CiAgICBpZiAoIW5ld19wb2wpIHsKICAgICAgICByZXQgPSAtRU5PTUVNOwogICAgICAgIGdvdG8gb3V0X2ZyZWVfZGF0YTsKICAgIH0KCiAgICBmcC5kYXRhID0gZGF0YTsKICAgIGZwLmxlbiA9IGxlbjsKICAgIHJldCA9IHBvbGljeWRiX3JlYWQoJm5ld19wb2wtPnBvbGljeWRiLCAmZnApOwogICAgaWYgKHJldCkgewogICAgICAgIHByX2Vycigic2Vwb2xpY3k1NDogcG9saWN5ZGJfcmVhZDogJWRcbiIsIHJldCk7CiAgICAgICAga2ZyZWUobmV3X3BvbCk7CiAgICAgICAgZ290byBvdXRfZnJlZV9kYXRhOwogICAgfQogICAgbmV3X3BvbC0+cG9saWN5ZGIubGVuID0gbGVuOwogICAga3ZmcmVlKGRhdGEpOwogICAgcHJfaW5mbygic2Vwb2xpY3k1NDogZHVwIHBvbGljeWRiIG9rLCBsZW4gJXp1XG4iLCBsZW4pOwogICAgcmV0dXJuIG5ld19wb2w7CgpvdXRfZnJlZV9kYXRhOgogICAga3ZmcmVlKGRhdGEpOwogICAgcmV0dXJuIEVSUl9QVFIocmV0KTsKfQo=").decode()
+P = "KernelSU/kernel/selinux/sepolicy.c"
+mark = "ksu54_sepolicy_backport"
+s = open(P, encoding="utf-8").read()
+# neutralise the 5.7+ implementations, keep every other helper in the file
+import re
+s = re.sub(r"void ksu_destroy_sepolicy\(struct selinux_policy \*pol\)\s*\{.*?\n\}\n", "", s, count=1, flags=re.S)
+s = re.sub(r"struct selinux_policy \*ksu_dup_sepolicy\(struct selinux_policy \*old_pol\)\s*\{.*?\n\}\n", "", s, count=1, flags=re.S)
+a = s.find('static bool add_filename_trans(struct policydb *db', s.find('static bool add_genfscon('))
+if a != -1:
+    b = s.find('static bool add_genfscon(', a)
+    if b != -1:
+        stub = ('#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 8, 0)' + chr(10) + s[a:b] +
+            '#else' + chr(10) +
+            'static bool add_filename_trans(struct policydb *db, const char *s, const char *t, const char *c,' + chr(10) +
+            '                               const char *d, const char *o)' + chr(10) +
+            '{' + chr(10) +
+            '    (void)o;' + chr(10) +
+            '    return add_type_rule(db, s, t, c, d, AVTAB_TRANSITION);' + chr(10) +
+            '}' + chr(10) +
+            '#endif' + chr(10))
+        s = s[:a] + stub + s[b:]
+        print('sepolicy.c: add_filename_trans guarded for 5.4')
+s += ADD
+s += chr(10) + "/* ksu54_sepolicy_backport appplied */" + chr(10)
+open(P, "w", encoding="utf-8").write(s)
+print("sepolicy.c: v5.7 helpers replaced with 5.4 policydb backport")
+SECPEOF
+fi
+echo "=== [KSU54] step 4e: selinux_hide needs 5.7+ selinux_policy API, stub on 5.4 ==="
+SIH="$SUDIR/feature/selinux_hide.c"
+if [ -f "$SIH" ] && ! grep -q ksu54_selinux_hide_stub "$SIH"; then
+python3 - <<'SIHEOF'
+import base64
+open("KernelSU/kernel/feature/selinux_hide.c", "w").write(base64.b64decode("I2luY2x1ZGUgInNlbGludXhfaGlkZS5oIgojaW5jbHVkZSA8bGludXgvdmVyc2lvbi5oPgojaW5jbHVkZSA8bGludXgvdHlwZXMuaD4KI2luY2x1ZGUgPGxpbnV4L2ZzLmg+CiNpbmNsdWRlIDxsaW51eC9rZXJuZWwuaD4KCiNpZiBMSU5VWF9WRVJTSU9OX0NPREUgPCBLRVJORUxfVkVSU0lPTig1LCA3LCAwKQovKiBrc3U1NF9zZWxpbnV4X2hpZGVfc3R1YjogRmluYVNVIHNlbGludXhfaGlkZSByZWJ1aWxkcyBTRUxpbnV4IHBvbGljeSB3aXRoCiAqIHNlY3VyaXR5X2NvbnRleHRfdG9fc2lkX3dpdGhfcG9saWN5KCkvc2VjdXJpdHlfY29tcHV0ZV9hdl91c2VyX3dpdGhfcG9saWN5KCksCiAqIHdoaWNoIG9ubHkgYXBwZWFyZWQgd2l0aCB0aGUgNS43IHNlbGludXhfcG9saWN5IHNwbGl0LiBPbiA1LjQgdGhlIGZlYXR1cmUgaXMKICogYSBuby1vcDsgU1VTRlMgaGlkaW5nIGl0c2VsZiBpcyBub3QgYWZmZWN0ZWQuCiAqLwojaW5jbHVkZSAic2VsaW51eC9zZXBvbGljeS5oIgojaW5jbHVkZSAia3N1LmgiCiNpbmNsdWRlICJrbG9nLmgiCmJvb2wga3N1X3NlbGludXhfaGlkZV9lbmFibGVkID0gZmFsc2U7CmJvb2wga3N1X3NlbGludXhfaGlkZV9ydW5uaW5nID0gZmFsc2U7CnNzaXplX3QgbXlfd3JpdGVfY29udGV4dChzdHJ1Y3QgZmlsZSAqZmlsZSwgY2hhciAqYnVmLCBzaXplX3Qgc2l6ZSkKewogICAgKHZvaWQpZmlsZTsKICAgICh2b2lkKWJ1ZjsKICAgIHJldHVybiBzaXplOwp9CnNzaXplX3QgbXlfd3JpdGVfYWNjZXNzKHN0cnVjdCBmaWxlICpmaWxlLCBjaGFyICpidWYsIHNpemVfdCBzaXplKQp7CiAgICAodm9pZClmaWxlOwogICAgKHZvaWQpYnVmOwogICAgcmV0dXJuIHNpemU7Cn0Kdm9pZCBrc3Vfc2VsaW51eF9oaWRlX2luaXQodm9pZCkKewogICAgcHJfaW5mbygic2VsaW51eF9oaWRlOiBzdHViYmVkIG9uIDUuNFxuIik7Cn0Kdm9pZCBrc3Vfc2VsaW51eF9oaWRlX2V4aXQodm9pZCkKewp9CnZvaWQga3N1X3NlbGludXhfaGlkZV9kcm9wX2JhY2t1cF9pZl91bnVzZWQodm9pZCkKewogICAgaWYgKGJhY2t1cF9zZXBvbGljeSkgewogICAgICAgIGtzdV9kZXN0cm95X3NlcG9saWN5KGJhY2t1cF9zZXBvbGljeSk7CiAgICAgICAgYmFja3VwX3NlcG9saWN5ID0gTlVMTDsKICAgIH0KfQp2b2lkIGtzdV9zZWxpbnV4X2hpZGVfaGFuZGxlX3NlY29uZF9zdGFnZSh2b2lkKQp7Cn0Kdm9pZCBrc3Vfc2VsaW51eF9oaWRlX2hhbmRsZV9wb3N0X2ZzX2RhdGEodm9pZCkKewp9CiNlbmRpZgo=").decode())
+print("selinux_hide.c: 5.4 no-op stub")
+SIHEOF
+fi
+echo "=== [KSU54] step 5: 5.4 has no seccomp syscall cache (added in 5.9) ==="
+SCC="$SUDIR/infra/seccomp_cache.c"
+if [ -f "$SCC" ] && ! grep -q ksu54_seccomp_stub "$SCC"; then
+cat > "$SCC" <<'SCCEOF'
+/* ksu54_seccomp_stub: Linux 5.4 has no seccomp syscall bitmap cache
+ * (that landed in 5.9 together with struct action_cache). FinaSU only uses
+ * these to pre-allow __NR_reboot for the manager uid; on 5.4 the syscall is
+ * simply evaluated by the normal filter path, so both helpers are no-ops.
+ */
+#include <linux/fs.h>
+#include <linux/seccomp.h>
+#include "klog.h" // IWYU pragma: keep
+#include "infra/seccomp_cache.h"
+
+void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr)
+{
+(void)filter;
+(void)nr;
+}
+
+void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
+{
+(void)filter;
+(void)nr;
+}
+SCCEOF
+echo "seccomp_cache.c replaced with 5.4 no-op stub"
+fi
+
+echo "=== [KSU54] step 5: 5.4 has no seccomp syscall cache (added in 5.9) ==="
+SCC="$SUDIR/infra/seccomp_cache.c"
+if [ -f "$SCC" ] && ! grep -q ksu54_seccomp_stub "$SCC"; then
+cat > "$SCC" <<'SCCEOF'
+/* ksu54_seccomp_stub: Linux 5.4 has no seccomp syscall bitmap cache
+ * (that landed in 5.9 together with struct action_cache). FinaSU only uses
+ * these to pre-allow __NR_reboot for the manager uid; on 5.4 the syscall is
+ * simply evaluated by the normal filter path, so both helpers are no-ops.
+ */
+#include <linux/fs.h>
+#include <linux/seccomp.h>
+#include "klog.h" // IWYU pragma: keep
+#include "infra/seccomp_cache.h"
+
+void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr)
+{
+(void)filter;
+(void)nr;
+}
+
+void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
+{
+(void)filter;
+(void)nr;
+}
+SCCEOF
+echo "seccomp_cache.c replaced with 5.4 no-op stub"
+fi
+
+echo "=== [KSU54] step 6: 5.4 fsnotify backport for pkg_observer.c ==="
+POB="$SUDIR/manager/pkg_observer.c"
+if [ -f "$POB" ] && ! grep -q ksu54_pkg_observer "$POB"; then
+python3 - <<'POBEOF'
+import base64
+src = base64.b64decode('Ly8gU1BEWC1MaWNlbnNlLUlkZW50aWZpZXI6IEdQTC0yLjAKLyoga3N1NTRfcGtnX29ic2VydmVyOiBMaW51eCA1LjQgYmFjay1wb3J0IG9mIEZpbmFTVSBwa2dfb2JzZXJ2ZXIuYyAqLwojaW5jbHVkZSA8bGludXgvbW9kdWxlLmg+CiNpbmNsdWRlIDxsaW51eC9mcy5oPgojaW5jbHVkZSA8bGludXgvbmFtZWkuaD4KI2luY2x1ZGUgPGxpbnV4L2Zzbm90aWZ5X2JhY2tlbmQuaD4KI2luY2x1ZGUgPGxpbnV4L3NjaGVkLmg+CiNpbmNsdWRlIDxsaW51eC9zbGFiLmg+CiNpbmNsdWRlIDxsaW51eC9yY3VsaXN0Lmg+CiNpbmNsdWRlIDxsaW51eC90YXNrX3dvcmsuaD4KI2luY2x1ZGUgPGxpbnV4L3ZlcnNpb24uaD4KI2luY2x1ZGUgImtsb2cuaCIKI2luY2x1ZGUgIm1hbmFnZXIvdGhyb25lX3RyYWNrZXIuaCIKCiNkZWZpbmUgTUFTS19TWVNURU0gKEZTX0NSRUFURSB8IEZTX01PVkUgfCBGU19FVkVOVF9PTl9DSElMRCkKCnN0cnVjdCB3YXRjaF9kaXIgewogICAgY29uc3QgY2hhciAqcGF0aDsKICAgIHUzMiBtYXNrOwogICAgc3RydWN0IHBhdGgga3BhdGg7CiAgICBzdHJ1Y3QgaW5vZGUgKmlub2RlOwogICAgc3RydWN0IGZzbm90aWZ5X21hcmsgKm1hcms7Cn07CgpzdGF0aWMgc3RydWN0IGZzbm90aWZ5X2dyb3VwICpnOwoKc3RhdGljIHZvaWQga3N1X3RyYWNrX3Rocm9uZV90d19mdW5jKHN0cnVjdCBjYWxsYmFja19oZWFkICpjYikKewogICAga2ZyZWUoY2IpOwogICAgaWYgKGN1cnJlbnQtPmZsYWdzICYgUEZfRVhJVElORykKICAgICAgICByZXR1cm47CiAgICB0cmFja190aHJvbmUoZmFsc2UpOwp9CgpzdGF0aWMgdm9pZCBrc3VfZGVmZXJfdHJhY2tfdGhyb25lKHZvaWQpCnsKICAgIHN0cnVjdCBjYWxsYmFja19oZWFkICpjYjsKCiAgICBpZiAoIShjdXJyZW50LT5mbGFncyAmIFBGX0tUSFJFQUQpKSB7CiAgICAgICAgY2IgPSBremFsbG9jKHNpemVvZigqY2IpLCBHRlBfS0VSTkVMKTsKICAgICAgICBpZiAoY2IpIHsKICAgICAgICAgICAgY2ItPmZ1bmMgPSBrc3VfdHJhY2tfdGhyb25lX3R3X2Z1bmM7CiAgICAgICAgICAgIGlmICghdGFza193b3JrX2FkZChjdXJyZW50LCBjYiwgdHJ1ZSkpCiAgICAgICAgICAgICAgICByZXR1cm47CiAgICAgICAgICAgIGtmcmVlKGNiKTsKICAgICAgICB9CiAgICB9CiAgICBwcl93YXJuKCJkZWZlciB0cmFja190aHJvbmUgZmFpbGVkLCBydW4gaXQgaW5saW5lIik7CiAgICB0cmFja190aHJvbmUoZmFsc2UpOwp9CgpzdGF0aWMgaW50IGtzdV9oYW5kbGVfZXZlbnQoc3RydWN0IGZzbm90aWZ5X2dyb3VwICpncm91cCwgc3RydWN0IGlub2RlICppbm9kZSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHUzMiBtYXNrLCBjb25zdCB2b2lkICpkYXRhLCBpbnQgZGF0YV90eXBlLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3Qgc3RydWN0IHFzdHIgKmZpbGVfbmFtZSwgdTMyIGNvb2tpZSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgIHN0cnVjdCBmc25vdGlmeV9pdGVyX2luZm8gKml0ZXJfaW5mbykKewogICAgKHZvaWQpZ3JvdXA7CiAgICAodm9pZClpbm9kZTsKICAgICh2b2lkKWRhdGE7CiAgICAodm9pZClkYXRhX3R5cGU7CiAgICAodm9pZCljb29raWU7CiAgICAodm9pZClpdGVyX2luZm87CgogICAgaWYgKCFmaWxlX25hbWUpCiAgICAgICAgcmV0dXJuIDA7CiAgICBpZiAobWFzayAmIEZTX0lTRElSKQogICAgICAgIHJldHVybiAwOwogICAgaWYgKGZpbGVfbmFtZS0+bGVuID09IDEzICYmICFtZW1jbXAoZmlsZV9uYW1lLT5uYW1lLCAicGFja2FnZXMubGlzdCIsIDEzKSkgewogICAgICAgIHByX2luZm8oInBhY2thZ2VzLmxpc3QgZGV0ZWN0ZWQ6ICV1IiwgbWFzayk7CiAgICAgICAga3N1X2RlZmVyX3RyYWNrX3Rocm9uZSgpOwogICAgfQogICAgcmV0dXJuIDA7Cn0KCnN0YXRpYyBjb25zdCBzdHJ1Y3QgZnNub3RpZnlfb3BzIGtzdV9vcHMgPSB7CiAgICAuaGFuZGxlX2V2ZW50ID0ga3N1X2hhbmRsZV9ldmVudCwKfTsKCnN0YXRpYyBpbnQgYWRkX21hcmtfb25faW5vZGUoc3RydWN0IGlub2RlICppbm9kZSwgdTMyIG1hc2ssIHN0cnVjdCBmc25vdGlmeV9tYXJrICoqb3V0KQp7CiAgICBzdHJ1Y3QgZnNub3RpZnlfbWFyayAqbTsKICAgIGludCByZXQ7CgogICAgbSA9IGt6YWxsb2Moc2l6ZW9mKCptKSwgR0ZQX0tFUk5FTCk7CiAgICBpZiAoIW0pCiAgICAgICAgcmV0dXJuIC1FTk9NRU07CiAgICBmc25vdGlmeV9pbml0X21hcmsobSwgZyk7CiAgICBtLT5tYXNrID0gbWFzazsKICAgIHJldCA9IGZzbm90aWZ5X2FkZF9pbm9kZV9tYXJrKG0sIGlub2RlLCAwKTsKICAgIGlmIChyZXQpIHsKICAgICAgICBmc25vdGlmeV9wdXRfbWFyayhtKTsKICAgICAgICByZXR1cm4gLUVJTlZBTDsKICAgIH0KICAgICpvdXQgPSBtOwogICAgcmV0dXJuIDA7Cn0KCnN0YXRpYyBpbnQgd2F0Y2hfb25lX2RpcihzdHJ1Y3Qgd2F0Y2hfZGlyICp3ZCkKewogICAgaW50IHJldDsKCiAgICByZXQgPSBrZXJuX3BhdGgod2QtPnBhdGgsIExPT0tVUF9GT0xMT1csICZ3ZC0+a3BhdGgpOwogICAgaWYgKHJldCkgewogICAgICAgIHByX2luZm8oInBhdGggbm90IHJlYWR5OiAlcyAoJWQpIiwgd2QtPnBhdGgsIHJldCk7CiAgICAgICAgcmV0dXJuIHJldDsKICAgIH0KICAgIHdkLT5pbm9kZSA9IGRfaW5vZGUod2QtPmtwYXRoLmRlbnRyeSk7CiAgICBpaG9sZCh3ZC0+aW5vZGUpOwogICAgcmV0ID0gYWRkX21hcmtfb25faW5vZGUod2QtPmlub2RlLCB3ZC0+bWFzaywgJndkLT5tYXJrKTsKICAgIGlmIChyZXQpIHsKICAgICAgICBwcl9lcnIoIkFkZCBtYXJrIGZhaWxlZCBmb3IgJXMgKCVkKSIsIHdkLT5wYXRoLCByZXQpOwogICAgICAgIHBhdGhfcHV0KCZ3ZC0+a3BhdGgpOwogICAgICAgIGlwdXQod2QtPmlub2RlKTsKICAgICAgICB3ZC0+aW5vZGUgPSBOVUxMOwogICAgICAgIHJldHVybiByZXQ7CiAgICB9CiAgICBwcl9pbmZvKCJ3YXRjaGluZyAlcyIsIHdkLT5wYXRoKTsKICAgIHJldHVybiAwOwp9CgpzdGF0aWMgdm9pZCB1bndhdGNoX29uZV9kaXIoc3RydWN0IHdhdGNoX2RpciAqd2QpCnsKICAgIGlmICh3ZC0+bWFyaykgewogICAgICAgIGZzbm90aWZ5X2Rlc3Ryb3lfbWFyayh3ZC0+bWFyaywgZyk7CiAgICAgICAgZnNub3RpZnlfcHV0X21hcmsod2QtPm1hcmspOwogICAgICAgIHdkLT5tYXJrID0gTlVMTDsKICAgIH0KICAgIGlmICh3ZC0+aW5vZGUpIHsKICAgICAgICBpcHV0KHdkLT5pbm9kZSk7CiAgICAgICAgd2QtPmlub2RlID0gTlVMTDsKICAgIH0KICAgIGlmICh3ZC0+a3BhdGguZGVudHJ5KSB7CiAgICAgICAgcGF0aF9wdXQoJndkLT5rcGF0aCk7CiAgICAgICAgbWVtc2V0KCZ3ZC0+a3BhdGgsIDAsIHNpemVvZih3ZC0+a3BhdGgpKTsKICAgIH0KfQoKc3RhdGljIHN0cnVjdCB3YXRjaF9kaXIgZ193YXRjaCA9IHsgLnBhdGggPSAiL2RhdGEvc3lzdGVtIiwgLm1hc2sgPSBNQVNLX1NZU1RFTSB9OwoKaW50IGtzdV9vYnNlcnZlcl9pbml0KHZvaWQpCnsKICAgIGludCByZXQ7CgogICAgZyA9IGZzbm90aWZ5X2FsbG9jX2dyb3VwKCZrc3Vfb3BzKTsKICAgIGlmIChJU19FUlIoZykpCiAgICAgICAgcmV0dXJuIFBUUl9FUlIoZyk7CiAgICByZXQgPSB3YXRjaF9vbmVfZGlyKCZnX3dhdGNoKTsKICAgIHByX2luZm8oIm9ic2VydmVyIGluaXQgZG9uZSIpOwogICAgcmV0dXJuIDA7Cn0KCnZvaWQga3N1X29ic2VydmVyX2V4aXQodm9pZCkKewogICAgdW53YXRjaF9vbmVfZGlyKCZnX3dhdGNoKTsKICAgIGZzbm90aWZ5X3B1dF9ncm91cChnKTsKICAgIHByX2luZm8oIm9ic2VydmVyIGV4aXQgZG9uZSIpOwp9Cg==').decode()
+open("KernelSU/kernel/manager/pkg_observer.c", "w").write(src)
+print("pkg_observer.c rewritten for 5.4 fsnotify API")
+POBEOF
+fi
+
+echo "=== [KSU54] step 7: export 5.4 mount helpers + retarget FinaSU mount calls ==="
+# FinaSU calls path_mount()/path_umount() (Linux 5.8+). On 5.4 the equivalents
+# are do_mount() (non-static) and ksys_umount() (path-string based). Both are
+# unexported, so export them, then retarget the two FinaSU call sites.
+NSC="$KDIR/fs/namespace.c"
+if [ -f "$NSC" ] && ! grep -q 'EXPORT_SYMBOL(do_mount)' "$NSC"; then
+python3 - <<'NSCEOF'
+import base64
+src = base64.b64decode('cCA9ICJmcy9uYW1lc3BhY2UuYyIKcyA9IG9wZW4ocCkucmVhZCgpCgphbmNob3IgPSAibG9uZyBkb19tb3VudChjb25zdCBjaGFyICpkZXZfbmFtZSwgY29uc3QgY2hhciBfX3VzZXIgKmRpcl9uYW1lLCIKaWR4ID0gcy5maW5kKGFuY2hvcikKaWYgaWR4IDwgMDoKICAgIHJhaXNlIFN5c3RlbUV4aXQoImRvX21vdW50IGRlZmluaXRpb24gbm90IGZvdW5kIikKCmVuZCA9IHMuZmluZCgiXG59XG4iLCBpZHgpCmlmIGVuZCA8IDA6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJkb19tb3VudCBlbmQgbm90IGZvdW5kIikKZW5kICs9IDMKcyA9IHNbOmVuZF0gKyAiRVhQT1JUX1NZTUJPTChkb19tb3VudCk7XG4iICsgc1tlbmQ6XQoKaSA9IHMuZmluZCgiaW50IGtzeXNfdW1vdW50KGNoYXIgX191c2VyICpuYW1lLCBpbnQgZmxhZ3MpIikKaWYgaSA8IDA6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJrc3lzX3Vtb3VudCBkZWZpbml0aW9uIG5vdCBmb3VuZCIpCmogPSBzLmZpbmQoIlxufVxuIiwgaSkKaWYgaiA8IDA6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJrc3lzX3Vtb3VudCBlbmQgbm90IGZvdW5kIikKaiArPSAzCnMgPSBzWzpqXSArICJFWFBPUlRfU1lNQk9MKGtzeXNfdW1vdW50KTtcbiIgKyBzW2o6XQoKb3BlbihwLCAidyIpLndyaXRlKHMpCnByaW50KCJuYW1lc3BhY2UuYzogZXhwb3J0ZWQgZG9fbW91bnQgKyBrc3lzX3Vtb3VudCIpCg==').decode()
+exec(compile(src, '<nsc_fix>', 'exec'))
+NSCEOF
+fi
+SMN="$SUDIR/infra/su_mount_ns.c"
+if [ -f "$SMN" ] && grep -q 'path_mount' "$SMN"; then
+python3 - "$SMN" <<'SMNEOF'
+import sys, base64
+src = base64.b64decode('aW1wb3J0IHN5cwoKcCA9IHN5cy5hcmd2WzFdCnMgPSBvcGVuKHApLnJlYWQoKQoKb2xkID0gImV4dGVybiBpbnQgcGF0aF9tb3VudChjb25zdCBjaGFyICpkZXZfbmFtZSwgc3RydWN0IHBhdGggKnBhdGgsIGNvbnN0IGNoYXIgKnR5cGVfcGFnZSwgdW5zaWduZWQgbG9uZyBmbGFncyxcbiAgICAgICAgICAgICAgICAgICAgICB2b2lkICpkYXRhX3BhZ2UpOyIKbmV3ID0gKCIvKiA1LjQgaGFzIG5vIHBhdGhfbW91bnQoKTsgZG9fbW91bnQoKSB0YWtlcyBhIF9fdXNlciBkaXJfbmFtZS4gKi9cbiIKICAgICAgICJleHRlcm4gbG9uZyBkb19tb3VudChjb25zdCBjaGFyICpkZXZfbmFtZSwgY29uc3QgY2hhciBfX3VzZXIgKmRpcl9uYW1lLFxuIgogICAgICAgIiAgICAgICAgICAgICAgICAgICAgIGNvbnN0IGNoYXIgKnR5cGVfcGFnZSwgdW5zaWduZWQgbG9uZyBmbGFncyxcbiIKICAgICAgICIgICAgICAgICAgICAgICAgICAgICB2b2lkICpkYXRhX3BhZ2UpOyIpCmlmIG9sZCBub3QgaW4gczoKICAgIHJhaXNlIFN5c3RlbUV4aXQoInBhdGhfbW91bnQgZGVjbCBhbmNob3Igbm90IGZvdW5kIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZF9jYWxsID0gImludCBwbV9yZXQgPSBwYXRoX21vdW50KE5VTEwsICZyb290X3BhdGgsIE5VTEwsIE1TX1BSSVZBVEUgfCBNU19SRUMsIE5VTEwpOyIKbmV3X2NhbGwgPSAoImludCBwbV9yZXQ7XG4iCiAgICAgICAgICAgICIgICAge1xuIgogICAgICAgICAgICAiICAgICAgICBjaGFyICpkaXIgPSBrbWFsbG9jKFBBVEhfTUFYLCBHRlBfS0VSTkVMKTtcbiIKICAgICAgICAgICAgIiAgICAgICAgaWYgKGRpcikge1xuIgogICAgICAgICAgICAiICAgICAgICAgICAgY2hhciAqcDIgPSBkX3BhdGgoJnJvb3RfcGF0aCwgZGlyLCBQQVRIX01BWCk7XG4iCiAgICAgICAgICAgICIgICAgICAgICAgICBpZiAoIUlTX0VSUihwMikpIHtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgICAgICBtbV9zZWdtZW50X3Qgb2xkZnMgPSBnZXRfZnMoKTtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgICAgICBzZXRfZnMoS0VSTkVMX0RTKTtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgICAgICBwbV9yZXQgPSAoaW50KWRvX21vdW50KE5VTEwsIChjb25zdCBjaGFyIF9fdXNlciAqKXAyLFxuIgogICAgICAgICAgICAiICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBOVUxMLCBNU19QUklWQVRFIHwgTVNfUkVDLCBOVUxMKTtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgICAgICBzZXRfZnMob2xkZnMpO1xuIgogICAgICAgICAgICAiICAgICAgICAgICAgfSBlbHNlIHtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgICAgICBwbV9yZXQgPSAoaW50KVBUUl9FUlIocDIpO1xuIgogICAgICAgICAgICAiICAgICAgICAgICAgfVxuIgogICAgICAgICAgICAiICAgICAgICAgICAga2ZyZWUoZGlyKTtcbiIKICAgICAgICAgICAgIiAgICAgICAgfSBlbHNlIHtcbiIKICAgICAgICAgICAgIiAgICAgICAgICAgIHBtX3JldCA9IC1FTk9NRU07XG4iCiAgICAgICAgICAgICIgICAgICAgIH1cbiIKICAgICAgICAgICAgIiAgICB9IikKaWYgb2xkX2NhbGwgbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJwYXRoX21vdW50IGNhbGwgYW5jaG9yIG5vdCBmb3VuZCIpCnMgPSBzLnJlcGxhY2Uob2xkX2NhbGwsIG5ld19jYWxsLCAxKQoKb3BlbihwLCAidyIpLndyaXRlKHMpCnByaW50KCJzdV9tb3VudF9ucy5jOiBwYXRoX21vdW50IC0+IGRvX21vdW50IikK').decode()
+sys.argv = ['smn_fix', sys.argv[1]]
+exec(compile(src, '<smn_fix>', 'exec'))
+SMNEOF
+fi
+KUM="$SUDIR/feature/kernel_umount.c"
+if [ -f "$KUM" ] && grep -q 'path_umount' "$KUM"; then
+python3 - "$KUM" <<'KUMEOF'
+import sys, base64
+src = base64.b64decode('aW1wb3J0IHN5cwoKcCA9IHN5cy5hcmd2WzFdCnMgPSBvcGVuKHApLnJlYWQoKQoKb2xkID0gImV4dGVybiBpbnQgcGF0aF91bW91bnQoc3RydWN0IHBhdGggKnBhdGgsIGludCBmbGFncyk7IgpuZXcgPSAoIi8qIDUuNCBoYXMgbm8gcGF0aF91bW91bnQoKTsga3N5c191bW91bnQoKSB0YWtlcyBhIHBhdGggc3RyaW5nLiAqL1xuIgogICAgICAgImV4dGVybiBpbnQga3N5c191bW91bnQoY2hhciBfX3VzZXIgKm5hbWUsIGludCBmbGFncyk7IikKaWYgb2xkIG5vdCBpbiBzOgogICAgcmFpc2UgU3lzdGVtRXhpdCgicGF0aF91bW91bnQgZGVjbCBhbmNob3Igbm90IGZvdW5kIikKcyA9IHMucmVwbGFjZShvbGQsIG5ldywgMSkKCm9sZF9mbiA9ICJzdGF0aWMgdm9pZCBrc3VfdW1vdW50X21udChjb25zdCBjaGFyICptbnQsIHN0cnVjdCBwYXRoICpwYXRoLCBpbnQgZmxhZ3MpXG57XG4gICAgaW50IGVyciA9IHBhdGhfdW1vdW50KHBhdGgsIGZsYWdzKTtcbiIKbmV3X2ZuID0gKCJzdGF0aWMgdm9pZCBrc3VfdW1vdW50X21udChjb25zdCBjaGFyICptbnQsIHN0cnVjdCBwYXRoICpwYXRoLCBpbnQgZmxhZ3MpXG4iCiAgICAgICAgICAie1xuIgogICAgICAgICAgIiAgICBpbnQgZXJyO1xuIgogICAgICAgICAgIiAgICBjaGFyICpkaXIgPSBrbWFsbG9jKFBBVEhfTUFYLCBHRlBfS0VSTkVMKTtcbiIKICAgICAgICAgICJcbiIKICAgICAgICAgICIgICAgaWYgKCFkaXIpXG4iCiAgICAgICAgICAiICAgICAgICByZXR1cm47XG4iCiAgICAgICAgICAiICAgIHtcbiIKICAgICAgICAgICIgICAgICAgIGNoYXIgKnAyID0gZF9wYXRoKHBhdGgsIGRpciwgUEFUSF9NQVgpO1xuIgogICAgICAgICAgIiAgICAgICAgaWYgKCFJU19FUlIocDIpKSB7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgbW1fc2VnbWVudF90IG9sZGZzID0gZ2V0X2ZzKCk7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgc2V0X2ZzKEtFUk5FTF9EUyk7XG4iCiAgICAgICAgICAiICAgICAgICAgICAgZXJyID0ga3N5c191bW91bnQoKGNoYXIgX191c2VyICopcDIsIGZsYWdzKTtcbiIKICAgICAgICAgICIgICAgICAgICAgICBzZXRfZnMob2xkZnMpO1xuIgogICAgICAgICAgIiAgICAgICAgfSBlbHNlIHtcbiIKICAgICAgICAgICIgICAgICAgICAgICBlcnIgPSAoaW50KVBUUl9FUlIocDIpO1xuIgogICAgICAgICAgIiAgICAgICAgfVxuIgogICAgICAgICAgIiAgICB9XG4iCiAgICAgICAgICAiICAgIGtmcmVlKGRpcik7XG4iKQppZiBvbGRfZm4gbm90IGluIHM6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJrc3VfdW1vdW50X21udCBib2R5IGFuY2hvciBub3QgZm91bmQiKQpzID0gcy5yZXBsYWNlKG9sZF9mbiwgbmV3X2ZuLCAxKQoKb3BlbihwLCAidyIpLndyaXRlKHMpCnByaW50KCJrZXJuZWxfdW1vdW50LmM6IHBhdGhfdW1vdW50IC0+IGtzeXNfdW1vdW50IikK').decode()
+sys.argv = ['kum_fix', sys.argv[1]]
+exec(compile(src, '<kum_fix>', 'exec'))
+KUMEOF
+fi
+echo "=== [KSU54] step 8: satisfy ksu_handle_devpts referenced by fs/devpts/inode.c ==="
+# The vendor tree already carries the KernelSU/ReSukiSU devpts hook:
+#   #ifdef CONFIG_KSU
+#   extern int ksu_handle_devpts(struct inode *);
+#   ksu_handle_devpts(dentry->d_inode);
+#   #endif
+# FinaSU documents this hook but ships no implementation, so the link step
+# dies with "undefined symbol: ksu_handle_devpts". FinaSU's own docs mark the
+# function as dead code on modern trees, so provide the no-op definition here
+# instead of ripping the call out of fs/devpts/inode.c.
+SCT="$SUDIR/feature/sucompat.c"
+if [ -f "$SCT" ] && ! grep -q ksu_handle_devpts "$SCT"; then
+python3 - "$SCT" <<'DEVPEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding='utf-8').read()
+add = (
+    chr(10) +
+    '/* ksu54_devpts_stub: the vendor fs/devpts/inode.c still calls this hook' + chr(10) +
+    ' * (carried over from the ReSukiSU era patch). FinaSU has no' + chr(10) +
+    ' * implementation and treats it as dead code, so define a no-op that the' + chr(10) +
+    ' * linker can satisfy. ' + chr(10) +
+    ' */' + chr(10) +
+    'int __maybe_unused ksu_handle_devpts(struct inode *inode)' + chr(10) +
+    '{' + chr(10) +
+    '    (void)inode;' + chr(10) +
+    '    return 0;' + chr(10) +
+    '}' + chr(10)
+)
+s = s + add
+open(p, 'w', encoding='utf-8').write(s)
+print('sucompat.c: ksu_handle_devpts no-op stub appended')
+DEVPEOF
+fi
+echo "=== [KSU54] step 8b: guard fs/devpts/inode.c hook call behind the stub ==="
+DPT="$KDIR/fs/devpts/inode.c"
+if [ -f "$DPT" ] && grep -q ksu_handle_devpts "$DPT"; then
+  echo "fs/devpts/inode.c keeps ksu_handle_devpts call, stub provides the symbol"
+fi
+
+echo "=== [KSU54] verification ==="
+ls -l include/linux/ksu54_compat.h
+echo "--- files carrying the compat header ---"
+grep -rln ksu54_compat KernelSU/kernel | sed 's|^|  |'
+echo "--- 5.4 gaps still present (should be empty) ---"
+grep -rn '#include <linux/pgtable.h>\|#include <linux/minmax.h>\|#include <linux/hex.h>' \
+  KernelSU/kernel --include=*.c --include=*.h | sed 's|^|  |' || true
+echo "=== [KSU54] DONE ==="
