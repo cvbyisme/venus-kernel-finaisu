@@ -1,0 +1,77 @@
+name: Package PURE AnyKernel3
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Source run id (must have venus-pure-kernel artifact)'
+        required: true
+        default: '41068031425'
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: venus-pure-kernel
+          path: artifact
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Show artifact
+        run: |
+          set -e
+          find artifact -type f -printf '%p %s\n'
+      - name: Package AnyKernel3 zip
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cd ak3
+          rm -rf .git .github patch README.md
+          mkdir -p patch
+          IMG=$(find ../artifact -name 'Image' -type f | head -1)
+          test -n "$IMG"
+          cp "$IMG" ./Image
+          ls -lh Image
+          sed -i 's/^kernel.string=.*/kernel.string=venus-PURE by cvby/' anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=venus/' anykernel.sh
+          sed -i 's/^device.name2=.*/device.name2=/' anykernel.sh
+          sed -i 's/^device.name3=.*/device.name3=/' anykernel.sh
+          sed -i 's/^device.name4=.*/device.name4=/' anykernel.sh
+          sed -i 's/^device.name5=.*/device.name5=/' anykernel.sh
+          sed -i 's#^BLOCK=.*#BLOCK=/dev/block/bootdevice/by-name/boot;#' anykernel.sh
+          sed -i 's/^IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=1;/' anykernel.sh
+          sed -i '/^backup_file /d;/^replace_string /d;/^insert_line /d;/^append_file /d;/^patch_fstab /d' anykernel.sh
+          grep -nE '^(kernel.string|device.name1|BLOCK|IS_SLOT_DEVICE|dump_boot|write_boot)' anykernel.sh
+          bash -n anykernel.sh
+          echo 'bash syntax OK'
+          chmod +x anykernel.sh
+          NAME="venus-PURE-$(date +%Y%m%d)-run${GITHUB_RUN_NUMBER}"
+          zip -r9 "../${NAME}.zip" . -x '*.git*' > /dev/null
+          cd ..
+          ls -lh *.zip
+          echo "AK3_NAME=${NAME}" >> $GITHUB_ENV
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pure-ak3-${{ github.run_number }}
+          name: venus PURE AnyKernel3 (no SUSFS)
+          body: |
+            venus (Xiaomi 11) PURE kernel - NO SUSFS backport
+
+            KSU dir present for Kconfig, CONFIG_KSU disabled.
+            Purpose: triage - determine if crash comes from SUSFS or baseline version.
+            NOT VERIFIED ON DEVICE.
+
+            - Base: 5.4.302 (Makefile VERSION/PATCHLEVEL/SUBLEVEL verified)
+            - ROM kernel: 5.4.274-qgki-gcc3ec22f5061 (28 patchlevels difference)
+            - Toolchain: ZyC clang 14.0.6
+            - Source artifact from run ${{ inputs.run_id }}
+
+            Rollback: keep a stock boot.img backup.
+          files: ${{ github.workspace }}/${{ env.AK3_NAME }}.zip
+          prerelease: true
+          draft: false
