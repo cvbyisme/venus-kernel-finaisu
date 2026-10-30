@@ -42,6 +42,12 @@ jobs:
             https://github.com/LyraVoid/FinaSU.git kernel/KernelSU
           echo "FinaSU HEAD: $(git -C kernel/KernelSU rev-parse --short HEAD)"
 
+      - name: Apply Linux 5.4 compatibility shims (no SUSFS)
+        run: |
+          chmod +x scripts/ksu54-compat.sh
+          bash scripts/ksu54-compat.sh "$PWD/kernel"
+          echo "=== 5.4 compat gate PASS ==="
+
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
