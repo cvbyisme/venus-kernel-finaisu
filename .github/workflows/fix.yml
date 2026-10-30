@@ -44,8 +44,9 @@ jobs:
 
       - name: Apply Linux 5.4 compatibility shims (no SUSFS)
         run: |
-          chmod +x scripts/ksu54-compat.sh
-          bash scripts/ksu54-compat.sh "$PWD/kernel"
+          ls -l ci/scripts/
+          chmod +x ci/scripts/ksu54-compat.sh
+          bash ci/scripts/ksu54-compat.sh "$PWD/kernel"
           echo "=== 5.4 compat gate PASS ==="
 
       - name: Free disk space
