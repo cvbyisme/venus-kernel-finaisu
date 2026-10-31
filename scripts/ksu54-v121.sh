@@ -147,9 +147,55 @@ open(path, 'w', encoding='utf-8').write(src)
 print('  patched: sulog/event.c minmax include guarded')
 PYEOF4
 
+
+echo "=== [v121] step 5: 5.4 stub for infra/seccomp_cache.c ==="
+python3 - "$SUDIR" <<'PYEOF5'
+import sys, os
+sudir = sys.argv[1]
+path = os.path.join(sudir, 'infra', 'seccomp_cache.c')
+if not os.path.exists(path):
+    print('  ERROR: infra/seccomp_cache.c not found'); sys.exit(1)
+src = open(path, encoding='utf-8').read()
+if 'v121_seccomp_stub' in src:
+    print('  skipped: seccomp stub already applied'); sys.exit(0)
+
+stub = '''/* v121_seccomp_stub: Linux 5.4 has no seccomp bitmap cache (added in 5.9).
+ * On 5.4 every syscall goes through the full seccomp filter, so there is
+ * nothing to pre-populate. These become no-ops: correct, just marginally
+ * slower than 5.9+ which caches the allow bitmask.
+ */
+#include <linux/version.h>
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+
+#include <linux/seccomp.h>
+#include "infra/seccomp_cache.h"
+
+void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr)
+{
+    (void)filter;
+    (void)nr;
+}
+
+void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr)
+{
+    (void)filter;
+    (void)nr;
+}
+
+#else
+'''
+
+# keep original body for 5.9+
+src = stub + src + '\n#endif\n'
+open(path, 'w', encoding='utf-8').write(src)
+print('  patched: seccomp_cache.c wrapped in 5.9 guard with no-op stubs')
+PYEOF5
+
 echo "=== [v121] result ==="
 grep -n 'v121_force_no_preinit\|KSU_NO_PREINIT' "$SUDIR/Kbuild" | head -3
 grep -n 'v121:\|v121_strncpy\|ksu_strncpy_from_user_nofault' "$SUDIR/feature/sucompat.c" | head -8
+grep -n 'v121_seccomp_stub' "$SUDIR/infra/seccomp_cache.c" | head -2
 grep -n 'v121_minmax_shim' "$SUDIR/sulog/event.c" | head -2
 grep -n 'v121_patchmem_shim\|ksu_p4d_to_phys_54\|ksu_copy_to_kernel_nofault' "$SUDIR/hook/arm64/patch_memory.c" | head -6
 echo "=== [v121] done ==="
