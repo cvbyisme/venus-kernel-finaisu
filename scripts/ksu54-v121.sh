@@ -193,65 +193,9 @@ print('  patched: seccomp_cache.c wrapped in 5.9 guard with no-op stubs')
 PYEOF5
 
 
-# --- step 6: manager/pkg_observer.c (task_work flags + fsnotify_ops ABI) ---
-cat > /tmp/shim6.txt <<'SHIM6EOF'
-
-/* v121_pkgobs_shim: 5.4 compat for task_work flags and fsnotify_ops */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0))
-static inline int ksu_task_work_add_54(struct task_struct *t, struct callback_head *cb)
-{
-    return task_work_add(t, cb, true);
-}
-#endif
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
-#define ksu_FSNOTIFY_OPS_FIELD handle_event
-#define ksu_FSNOTIFY_HANDLER_54 ksu_handle_event_54
-static int ksu_handle_event_54(struct fsnotify_group *group, struct inode *inode, u32 mask,
-                               const void *data, int data_type, const struct qstr *file_name,
-                               u32 cookie, struct fsnotify_iter_info *iter_info)
-{
-    return ksu_handle_inode_event(NULL, mask, inode, NULL, file_name, cookie);
-}
-#else
-#define ksu_FSNOTIFY_OPS_FIELD handle_inode_event
-#define ksu_FSNOTIFY_HANDLER_54 ksu_handle_inode_event
-#endif
-SHIM6EOF
-cat > /tmp/step6.py <<'PYEOF6'
-import sys, os
-sudir = sys.argv[1]
-path = os.path.join(sudir, 'manager', 'pkg_observer.c')
-if not os.path.exists(path):
-    print('  ERROR: manager/pkg_observer.c not found'); sys.exit(1)
-src = open(path, encoding='utf-8').read()
-if 'v121_pkgobs_shim' in src:
-    print('  skipped: already patched'); sys.exit(0)
-
-# 1) TWA_RESUME -> 5.4 shim (task_work_add 第三参数是 bool)
-old_twa = 'if (!task_work_add(current, cb, TWA_RESUME))'
-if old_twa in src:
-    src = src.replace(old_twa, 'if (!ksu_task_work_add_54(current, cb))', 1)
-else:
-    print('  ERROR: task_work_add anchor not found'); sys.exit(1)
-
-# 2) fsnotify_ops 字段名与 handler -> 宏映射
-old_ops = '    .handle_inode_event = ksu_handle_inode_event,'
-if old_ops in src:
-    src = src.replace(old_ops, '    ksu_FSNOTIFY_OPS_FIELD = ksu_FSNOTIFY_HANDLER_54,', 1)
-else:
-    print('  ERROR: fsnotify_ops anchor not found'); sys.exit(1)
-
-# 3) shim 必须插在 ksu_handle_inode_event 定义之后（否则前向引用）
-shim = open('/tmp/shim6.txt').read()
-anchor = '''static const struct fsnotify_ops ksu_ops = {'''
-if anchor not in src:
-    print('  ERROR: shim anchor not found'); sys.exit(1)
-src = src.replace(anchor, shim + '\n' + anchor, 1)
-
-open(path, 'w', encoding='utf-8').write(src)
-print('  patched: pkg_observer.c (task_work + fsnotify_ops shims)')
-PYEOF6
+# --- step 6: manager/pkg_observer.c ---
+echo 'LyogdjEyMV9wa2dvYnNfc2hpbTogNS40IGNvbXBhdCBmb3IgdGFza193b3JrIGZsYWdzIGFuZCBmc25vdGlmeV9vcHMgKi8KI2lmIChMSU5VWF9WRVJTSU9OX0NPREUgPCBLRVJORUxfVkVSU0lPTig1LCA4LCAwKSkKc3RhdGljIGlubGluZSBpbnQga3N1X3Rhc2tfd29ya19hZGRfNTQoc3RydWN0IHRhc2tfc3RydWN0ICp0LCBzdHJ1Y3QgY2FsbGJhY2tfaGVhZCAqY2IpCnsKICAgIHJldHVybiB0YXNrX3dvcmtfYWRkKHQsIGNiLCB0cnVlKTsKfQojZWxzZQojZGVmaW5lIGtzdV90YXNrX3dvcmtfYWRkXzU0KHQsIGNiKSB0YXNrX3dvcmtfYWRkKCh0KSwgKGNiKSwgVFdBX1JFU1VNRSkKI2VuZGlmCgojaWYgKExJTlVYX1ZFUlNJT05fQ09ERSA8IEtFUk5FTF9WRVJTSU9OKDUsIDksIDApKQpzdGF0aWMgaW50IGtzdV9oYW5kbGVfZXZlbnRfNTQoc3RydWN0IGZzbm90aWZ5X2dyb3VwICpncm91cCwgc3RydWN0IGlub2RlICppbm9kZSwgdTMyIG1hc2ssCiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICBjb25zdCB2b2lkICpkYXRhLCBpbnQgZGF0YV90eXBlLCBjb25zdCBzdHJ1Y3QgcXN0ciAqZmlsZV9uYW1lLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgdTMyIGNvb2tpZSwgc3RydWN0IGZzbm90aWZ5X2l0ZXJfaW5mbyAqaXRlcl9pbmZvKTsKI2RlZmluZSBrc3VfRlNOT1RJRllfT1BTX0ZJRUxEIC5oYW5kbGVfZXZlbnQKI2RlZmluZSBrc3VfRlNOT1RJRllfSEFORExFUl81NCBrc3VfaGFuZGxlX2V2ZW50XzU0CiNlbHNlCiNkZWZpbmUga3N1X0ZTTk9USUZZX09QU19GSUVMRCAuaGFuZGxlX2lub2RlX2V2ZW50CiNkZWZpbmUga3N1X0ZTTk9USUZZX0hBTkRMRVJfNTQga3N1X2hhbmRsZV9pbm9kZV9ldmVudAojZW5kaWYK' | base64 -d > /tmp/shim6.txt
+echo 'aW1wb3J0IHN5cywgb3MKc3VkaXIgPSBzeXMuYXJndlsxXQpwYXRoID0gb3MucGF0aC5qb2luKHN1ZGlyLCAnbWFuYWdlcicsICdwa2dfb2JzZXJ2ZXIuYycpCmlmIG5vdCBvcy5wYXRoLmV4aXN0cyhwYXRoKToKICAgIHByaW50KCcgIEVSUk9SOiBtYW5hZ2VyL3BrZ19vYnNlcnZlci5jIG5vdCBmb3VuZCcpOyBzeXMuZXhpdCgxKQpzcmMgPSBvcGVuKHBhdGgsIGVuY29kaW5nPSd1dGYtOCcpLnJlYWQoKQppZiAndjEyMV9wa2dvYnNfc2hpbScgaW4gc3JjOgogICAgcHJpbnQoJyAgc2tpcHBlZDogYWxyZWFkeSBwYXRjaGVkJyk7IHN5cy5leGl0KDApCgojIDEpIFRXQV9SRVNVTUUgLT4gc2hpbSAoNS40IHRhc2tfd29ya19hZGQg56ys5LiJ5Y+C5pWw5pivIGJvb2wpCm9sZF90d2EgPSAnaWYgKCF0YXNrX3dvcmtfYWRkKGN1cnJlbnQsIGNiLCBUV0FfUkVTVU1FKSknCmlmIG9sZF90d2EgaW4gc3JjOgogICAgc3JjID0gc3JjLnJlcGxhY2Uob2xkX3R3YSwgJ2lmICgha3N1X3Rhc2tfd29ya19hZGRfNTQoY3VycmVudCwgY2IpKScsIDEpCmVsc2U6CiAgICBwcmludCgnICBFUlJPUjogdGFza193b3JrX2FkZCBhbmNob3Igbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCgojIDIpIGZzbm90aWZ5X29wcyBoYW5kbGVyIOe7keWumiAtPiDlro/mmKDlsITvvIjlro/ph4zluKbngrnlj7fvvIkKb2xkX29wcyA9ICcgICAgLmhhbmRsZV9pbm9kZV9ldmVudCA9IGtzdV9oYW5kbGVfaW5vZGVfZXZlbnQsJwppZiBvbGRfb3BzIGluIHNyYzoKICAgIHNyYyA9IHNyYy5yZXBsYWNlKG9sZF9vcHMsICcgICAga3N1X0ZTTk9USUZZX09QU19GSUVMRCA9IGtzdV9GU05PVElGWV9IQU5ETEVSXzU0LCcsIDEpCmVsc2U6CiAgICBwcmludCgnICBFUlJPUjogZnNub3RpZnlfb3BzIGFuY2hvciBub3QgZm91bmQnKTsgc3lzLmV4aXQoMSkKCiMgMykgc2hpbSDlv4Xpobvmj5LlnKggTUFTS19TWVNURU0g5LmL5ZCO77yI56ys5LiA5Liq5Ye95pWw5LmL5YmN77yJ77yM5ZCm5YiZ56ysIDQ4IOihjOWJjeWQkeW8leeUqOaKpemUmQpzaGltID0gb3BlbignL3RtcC9zaGltNi50eHQnLCBlbmNvZGluZz0ndXRmLTgnKS5yZWFkKCkKYW5jaG9yID0gJyNkZWZpbmUgTUFTS19TWVNURU0gKEZTX0NSRUFURSB8IEZTX01PVkUgfCBGU19FVkVOVF9PTl9DSElMRClcbicKaWYgYW5jaG9yIG5vdCBpbiBzcmM6CiAgICBwcmludCgnICBFUlJPUjogc2hpbSBhbmNob3Igbm90IGZvdW5kJyk7IHN5cy5leGl0KDEpCnNyYyA9IHNyYy5yZXBsYWNlKGFuY2hvciwgYW5jaG9yICsgJ1xuJyArIHNoaW0gKyAnXG4nLCAxKQoKIyA0KSBrc3VfaGFuZGxlX2V2ZW50XzU0IOeahOWumuS5ieimgeaUvuWcqCBrc3VfaGFuZGxlX2lub2RlX2V2ZW50IOS5i+WQjgpkZWZfZm4gPSAnJycKI2lmIChMSU5VWF9WRVJTSU9OX0NPREUgPCBLRVJORUxfVkVSU0lPTig1LCA5LCAwKSkKc3RhdGljIGludCBrc3VfaGFuZGxlX2V2ZW50XzU0KHN0cnVjdCBmc25vdGlmeV9ncm91cCAqZ3JvdXAsIHN0cnVjdCBpbm9kZSAqaW5vZGUsIHUzMiBtYXNrLAogICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgY29uc3Qgdm9pZCAqZGF0YSwgaW50IGRhdGFfdHlwZSwgY29uc3Qgc3RydWN0IHFzdHIgKmZpbGVfbmFtZSwKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHUzMiBjb29raWUsIHN0cnVjdCBmc25vdGlmeV9pdGVyX2luZm8gKml0ZXJfaW5mbykKewogICAgKHZvaWQpZ3JvdXA7ICh2b2lkKWRhdGE7ICh2b2lkKWRhdGFfdHlwZTsgKHZvaWQpaXRlcl9pbmZvOwogICAgcmV0dXJuIGtzdV9oYW5kbGVfaW5vZGVfZXZlbnQoTlVMTCwgbWFzaywgaW5vZGUsIE5VTEwsIGZpbGVfbmFtZSwgY29va2llKTsKfQojZW5kaWYKJycnCm9wc19hbmNob3IgPSAnc3RhdGljIGNvbnN0IHN0cnVjdCBmc25vdGlmeV9vcHMga3N1X29wcyA9IHsnCmlmIG9wc19hbmNob3Igbm90IGluIHNyYzoKICAgIHByaW50KCcgIEVSUk9SOiBrc3Vfb3BzIGFuY2hvciBub3QgZm91bmQnKTsgc3lzLmV4aXQoMSkKc3JjID0gc3JjLnJlcGxhY2Uob3BzX2FuY2hvciwgZGVmX2ZuICsgJ1xuJyArIG9wc19hbmNob3IsIDEpCgpvcGVuKHBhdGgsICd3JywgZW5jb2Rpbmc9J3V0Zi04Jykud3JpdGUoc3JjKQpwcmludCgnICBwYXRjaGVkOiBwa2dfb2JzZXJ2ZXIuYyAodGFza193b3JrICsgZnNub3RpZnlfb3BzIHNoaW1zKScpCg==' | base64 -d > /tmp/step6.py
 python3 /tmp/step6.py "$SUDIR" || echo "[v121] WARN: step6 failed"
 echo "=== [v121] result ==="
 grep -n 'v121_force_no_preinit\|KSU_NO_PREINIT' "$SUDIR/Kbuild" | head -3
