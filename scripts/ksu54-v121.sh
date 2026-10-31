@@ -192,10 +192,72 @@ open(path, 'w', encoding='utf-8').write(src)
 print('  patched: seccomp_cache.c wrapped in 5.9 guard with no-op stubs')
 PYEOF5
 
+
+# --- step 6: manager/pkg_observer.c (task_work flags + fsnotify_ops ABI) ---
+cat > /tmp/shim6.txt <<'SHIM6EOF'
+
+/* v121_pkgobs_shim: 5.4 compat for task_work flags and fsnotify_ops */
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0))
+static inline int ksu_task_work_add_54(struct task_struct *t, struct callback_head *cb)
+{
+    return task_work_add(t, cb, true);
+}
+#endif
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+#define ksu_FSNOTIFY_OPS_FIELD handle_event
+#define ksu_FSNOTIFY_HANDLER_54 ksu_handle_event_54
+static int ksu_handle_event_54(struct fsnotify_group *group, struct inode *inode, u32 mask,
+                               const void *data, int data_type, const struct qstr *file_name,
+                               u32 cookie, struct fsnotify_iter_info *iter_info)
+{
+    return ksu_handle_inode_event(NULL, mask, inode, NULL, file_name, cookie);
+}
+#else
+#define ksu_FSNOTIFY_OPS_FIELD handle_inode_event
+#define ksu_FSNOTIFY_HANDLER_54 ksu_handle_inode_event
+#endif
+SHIM6EOF
+cat > /tmp/step6.py <<'PYEOF6'
+import sys, os
+sudir = sys.argv[1]
+path = os.path.join(sudir, 'manager', 'pkg_observer.c')
+if not os.path.exists(path):
+    print('  ERROR: manager/pkg_observer.c not found'); sys.exit(1)
+src = open(path, encoding='utf-8').read()
+if 'v121_pkgobs_shim' in src:
+    print('  skipped: already patched'); sys.exit(0)
+
+# 1) TWA_RESUME -> 5.4 shim (task_work_add 第三参数是 bool)
+old_twa = 'if (!task_work_add(current, cb, TWA_RESUME))'
+if old_twa in src:
+    src = src.replace(old_twa, 'if (!ksu_task_work_add_54(current, cb))', 1)
+else:
+    print('  ERROR: task_work_add anchor not found'); sys.exit(1)
+
+# 2) fsnotify_ops 字段名与 handler -> 宏映射
+old_ops = '    .handle_inode_event = ksu_handle_inode_event,'
+if old_ops in src:
+    src = src.replace(old_ops, '    ksu_FSNOTIFY_OPS_FIELD = ksu_FSNOTIFY_HANDLER_54,', 1)
+else:
+    print('  ERROR: fsnotify_ops anchor not found'); sys.exit(1)
+
+# 3) shim 必须插在 ksu_handle_inode_event 定义之后（否则前向引用）
+shim = open('/root/work/shim6.txt').read()
+anchor = '''static const struct fsnotify_ops ksu_ops = {'''
+if anchor not in src:
+    print('  ERROR: shim anchor not found'); sys.exit(1)
+src = src.replace(anchor, shim + '\n' + anchor, 1)
+
+open(path, 'w', encoding='utf-8').write(src)
+print('  patched: pkg_observer.c (task_work + fsnotify_ops shims)')
+PYEOF6
+python3 /tmp/step6.py "$SUDIR" || echo "[v121] WARN: step6 failed"
 echo "=== [v121] result ==="
 grep -n 'v121_force_no_preinit\|KSU_NO_PREINIT' "$SUDIR/Kbuild" | head -3
 grep -n 'v121:\|v121_strncpy\|ksu_strncpy_from_user_nofault' "$SUDIR/feature/sucompat.c" | head -8
 grep -n 'v121_seccomp_stub' "$SUDIR/infra/seccomp_cache.c" | head -2
 grep -n 'v121_minmax_shim' "$SUDIR/sulog/event.c" | head -2
+grep -n 'v121_pkgobs_shim\|ksu_task_work_add_54\|ksu_FSNOTIFY' "$SUDIR/manager/pkg_observer.c" | head -6
 grep -n 'v121_patchmem_shim\|ksu_p4d_to_phys_54\|ksu_copy_to_kernel_nofault' "$SUDIR/hook/arm64/patch_memory.c" | head -6
 echo "=== [v121] done ==="
