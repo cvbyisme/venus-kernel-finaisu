@@ -243,7 +243,7 @@ else:
     print('  ERROR: fsnotify_ops anchor not found'); sys.exit(1)
 
 # 3) shim 必须插在 ksu_handle_inode_event 定义之后（否则前向引用）
-shim = open('/root/work/shim6.txt').read()
+shim = open('/tmp/shim6.txt').read()
 anchor = '''static const struct fsnotify_ops ksu_ops = {'''
 if anchor not in src:
     print('  ERROR: shim anchor not found'); sys.exit(1)
