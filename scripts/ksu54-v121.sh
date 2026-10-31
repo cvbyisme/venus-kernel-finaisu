@@ -122,8 +122,34 @@ open(path, 'w', encoding='utf-8').write(src)
 print('  patched: patch_memory.c (p4d_to_phys + copy_to_kernel_nofault shims)')
 PYEOF3
 
+
+echo "=== [v121] step 4: 5.4 shims for sulog/event.c ==="
+python3 - "$SUDIR" <<'PYEOF4'
+import sys, os
+sudir = sys.argv[1]
+path = os.path.join(sudir, 'sulog', 'event.c')
+if not os.path.exists(path):
+    print('  ERROR: sulog/event.c not found'); sys.exit(1)
+src = open(path, encoding='utf-8').read()
+if 'v121_minmax_shim' in src:
+    print('  skipped: minmax already patched'); sys.exit(0)
+old = '#include <linux/minmax.h>'
+if old not in src:
+    print('  WARN: linux/minmax.h anchor not found'); sys.exit(0)
+new = ('/* v121_minmax_shim: linux/minmax.h split out in 5.11; 5.4 has these in linux/kernel.h */\n'
+       '#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0))\n'
+       + old + '\n'
+       '#else\n'
+       '#include <linux/kernel.h>\n'
+       '#endif')
+src = src.replace(old, new, 1)
+open(path, 'w', encoding='utf-8').write(src)
+print('  patched: sulog/event.c minmax include guarded')
+PYEOF4
+
 echo "=== [v121] result ==="
 grep -n 'v121_force_no_preinit\|KSU_NO_PREINIT' "$SUDIR/Kbuild" | head -3
 grep -n 'v121:\|v121_strncpy\|ksu_strncpy_from_user_nofault' "$SUDIR/feature/sucompat.c" | head -8
+grep -n 'v121_minmax_shim' "$SUDIR/sulog/event.c" | head -2
 grep -n 'v121_patchmem_shim\|ksu_p4d_to_phys_54\|ksu_copy_to_kernel_nofault' "$SUDIR/hook/arm64/patch_memory.c" | head -6
 echo "=== [v121] done ==="
