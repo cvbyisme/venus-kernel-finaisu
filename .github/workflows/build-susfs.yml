@@ -179,6 +179,19 @@ jobs:
               --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP \
               --enable KSU_DYNAMIC_MANAGER
           fi
+          # ---- 功耗调优（A 档）：schedutil 默认 governor + 低功耗 workqueue ----
+          ./scripts/config --file out/.config \
+            --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL \
+            --disable CPU_FREQ_DEFAULT_GOV_PERFORMANCE \
+            --enable WQ_POWER_EFFICIENT_DEFAULT \
+            --disable SCHED_DEBUG \
+            --disable PROFILING
+            # ---- 卡顿修复（B 档）：启用 MGLRU + 关 init_on_alloc + 关 list 完整性检查 ----
+            ./scripts/config --file out/.config \
+              --enable LRU_GEN \
+              --enable LRU_GEN_ENABLED \
+              --disable INIT_ON_ALLOC_DEFAULT_ON \
+              --disable DEBUG_LIST
           make -j$(nproc) O=out olddefconfig
 
           # flask.h 是 security/selinux 目录构建时才生成的（out/security/selinux/flask.h），
@@ -227,6 +240,19 @@ jobs:
               --enable KSU_DYNAMIC_MANAGER
           fi
 
+          # ---- 功耗调优（A 档）：schedutil 默认 governor + 低功耗 workqueue ----
+          ./scripts/config --file out/.config \
+            --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL \
+            --disable CPU_FREQ_DEFAULT_GOV_PERFORMANCE \
+            --enable WQ_POWER_EFFICIENT_DEFAULT \
+            --disable SCHED_DEBUG \
+            --disable PROFILING
+            # ---- 卡顿修复（B 档）：启用 MGLRU + 关 init_on_alloc + 关 list 完整性检查 ----
+            ./scripts/config --file out/.config \
+              --enable LRU_GEN \
+              --enable LRU_GEN_ENABLED \
+              --disable INIT_ON_ALLOC_DEFAULT_ON \
+              --disable DEBUG_LIST
           # 不要 -g<sha> 后缀，只用我们自己的 Neko-CL 版本号
           ./scripts/config --file out/.config --set-str LOCALVERSION ""
           ./scripts/config --file out/.config --disable LOCALVERSION_AUTO
@@ -267,6 +293,9 @@ jobs:
             grep -E '^CONFIG_(KPROBES|EXT4_FS|THREAD_INFO_IN_TASK|MODULES)' out/.config || true
             exit 1
           fi
+          echo "=== perf config check (B)" ===
+          grep -E '^CONFIG_(LRU_GEN|LRU_GEN_ENABLED|INIT_ON_ALLOC_DEFAULT_ON|DEBUG_LIST)=' out/.config || true
+          grep -qx 'CONFIG_LRU_GEN_ENABLED=y' out/.config || { echo "::error::LRU_GEN_ENABLED not enabled"; exit 1; }
           echo "KSU/SUSFS config gate: PASS"
 
           # D1 修补：不传 KSU_SECOND_SIGNATURE_RELEASE=1 时，
