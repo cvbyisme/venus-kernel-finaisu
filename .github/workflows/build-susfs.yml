@@ -56,6 +56,15 @@ jobs:
         run: |
           bash ci/scripts/sched-tune.sh "$PWD/kernel"
 
+      # 稳定性 backport：hrtimer 热插拔、RT push/self-IPI、f2fs NAT 锁
+      - name: Stability backports (hrtimer / RT / f2fs)
+        run: |
+          if compgen -G ci/scripts/stability-patches/*.patch > /dev/null; then
+            chmod +x ci/scripts/stability-apply.sh
+            bash ci/scripts/stability-apply.sh "$PWD/kernel"
+          else
+            echo "no stability patches"
+          fi
       - name: Clone FinaSU into KernelSU/
         run: |
           rm -rf kernel/KernelSU
