@@ -1,0 +1,60 @@
+From: hushangda <noreply@github.com>
+Subject: [PATCH 3/3] sched/rt: fix pushable task race and avoid self IPI in RT balance
+
+find_lock_lowest_rq() re-validated the task with a stale condition list; use
+pick_next_pushable_task() as the single source of truth. rto_next_cpu() could
+return the current CPU and send an IPI to itself.
+
+XR QoS hunks from the source commit are intentionally omitted (not present in
+this tree).
+Source: hushangda/android_kernel_xiaomi_sm8350_venus 5d8a2f293d
+--- a/kernel/sched/rt.c
++++ b/kernel/sched/rt.c
+@@ -2112,6 +2112,8 @@
+ 	return -1;
+ }
+ 
++static struct task_struct *pick_next_pushable_task(struct rq *rq);
++
+ /* Will lock the rq it finds */
+ static struct rq *find_lock_lowest_rq(struct task_struct *task, struct rq *rq)
+ {
+@@ -2142,14 +2144,12 @@
+ 			/*
+ 			 * We had to unlock the run queue. In
+ 			 * the mean time, task could have
+-			 * migrated already or had its affinity changed.
+-			 * Also make sure that it wasn't scheduled on its rq.
++			 * migrated already or had its affinity changed,
++			 * therefore check if the task is still at the
++			 * head of the pushable tasks list.
+ 			 */
+-			if (unlikely(task_rq(task) != rq ||
+-				     !cpumask_test_cpu(lowest_rq->cpu, task->cpus_ptr) ||
+-				     task_running(rq, task) ||
+-				     !rt_task(task) ||
+-				     !task_on_rq_queued(task))) {
++			if (unlikely(!cpumask_test_cpu(lowest_rq->cpu, task->cpus_ptr) ||
++				     task != pick_next_pushable_task(rq))) {
+ 
+ 				double_unlock_balance(rq, lowest_rq);
+ 				lowest_rq = NULL;
+@@ -2328,6 +2328,7 @@
+  */
+ static int rto_next_cpu(struct root_domain *rd)
+ {
++	int this_cpu = smp_processor_id();
+ 	int next;
+ 	int cpu;
+ 
+@@ -2350,6 +2351,10 @@
+ 		cpu = cpumask_next(rd->rto_cpu, rd->rto_mask);
+ 
+ 		rd->rto_cpu = cpu;
++
++		/* Do not send IPI to self */
++		if (cpu == this_cpu)
++			continue;
+ 
+ 		if (cpu < nr_cpu_ids)
+ 			return cpu;
