@@ -63,6 +63,20 @@ jobs:
             https://github.com/LyraVoid/FinaSU.git kernel/KernelSU
           echo "FinaSU HEAD: $(git -C kernel/KernelSU rev-parse --short HEAD)"
 
+      - name: Patch FinaSU Inline sucompat (basename match + kernel fd exec)
+        run: |
+          # 官方 Inline 版（kernel/extension/susfs.c）只认绝对路径
+          # "/system/bin/su"，且命中后只把 filename 改名成 /data/adb/ksud，
+          # 仍由调用方 creds 做一次 namei -> 非特权域（Termux 等
+          # untrusted_app/app_data_file）被 SELinux 拒成 EACCES。
+          # 这里改成 basename=="su" 匹配 + 内核侧 filp_open/fd_install +
+          # AT_EMPTY_PATH 执行，与 syscall-hook 版 sucompat 等价。
+          if grep -q '^CONFIG_KSU_HOOK_SUSFS_INLINE=y' kernel/arch/arm64/configs/venus_defconfig; then
+            python3 ci/scripts/patch_fsu_inline_sucompat.py kernel/KernelSU/kernel/extension/susfs.c
+          else
+            echo "not the SUSFS Inline backend, sucompat patch skipped"
+          fi
+
       - name: Integrate SUSFS 5.4 into FinaSU kernel tree
         run: |
           chmod +x ci/scripts/susfs-setup.sh
